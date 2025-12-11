@@ -1,0 +1,10 @@
+data:
+  features: HalfKP
+  train: ../train.bin
+  val: ../train.bin
+  smart_fen_skipping: true
+  random_fen_skipping: 10
+  batch_size: 16384
+  num_workers: 8
+trainer:
+  gpus: 1

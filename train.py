@@ -16,7 +16,7 @@ class NNUEDataModule(pl.LightningDataModule):
         super().__init__()
         if batch_size <= 0:
             batch_size = 128 if not torch.cuda.is_available() else 8192
-        self.save_hyperparameters('train', 'val', 'features', 'num_workers', 'batch_size', 'smart_fen_skipping', 'random_fen_skipping', 'epoch_size', 'py_data')
+        self.save_hyperparameters()
         self.feature_set = features.get_feature_set_from_name(self.hparams.features)
 
     def setup(self, stage: typing.Optional[str] = None):
