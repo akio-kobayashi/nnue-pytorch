@@ -202,11 +202,7 @@ class NNUE(pl.LightningModule):
       epoch,
       batch_idx,
       optimizer,
-      optimizer_idx,
       optimizer_closure,
-      on_tpu,
-      using_native_amp,
-      using_lbfgs,
   ):
     # manually warm up lr without a scheduler
     if self.trainer.global_step - self.warmup_start_global_step < self.num_batches_warmup:
