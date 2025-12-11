@@ -60,12 +60,17 @@ class NNUEDataModule(pl.LightningDataModule):
         else:
             return DataLoader(self.val_ds, batch_size=None, batch_sampler=None)
 
+class MyCLI(LightningCLI):
+    def add_arguments_to_parser(self, parser):
+        parser.link_arguments("data.features", "model.features")
+
+
 def main():
     # LightningCLI will add arguments for the model, datamodule, and trainer.
     # It will also handle seeding and checkpointing.
     # All model/data/trainer arguments are now passed through the command line
     # with dot notation, e.g., --model.lambda_ 0.5 or --data.batch_size 8192
-    cli = LightningCLI(M.NNUE, NNUEDataModule, save_config_callback=None)
+    cli = MyCLI(M.NNUE, NNUEDataModule, save_config_callback=None)
 
 if __name__ == '__main__':
     main()
