@@ -410,7 +410,7 @@ struct alignas(32) Bitboard256
 	// SSE2のunpackを実行して返す。
 	// hi_out = _mm256_unpackhi_epi64(lo_in,hi_in);
 	// lo_out = _mm256_unpacklo_epi64(lo_in,hi_in);
-	static void unpack(const Bitboard256 hi_in,const Bitboard256 lo_in, Bitboard256& hi_out, Bitboard256& lo_out);
+	static void unpack(const Bitboard256& hi_in,const Bitboard256& lo_in, Bitboard256& hi_out, Bitboard256& lo_out);
 
 	// 2組のBitboard256を、それぞれ64bitのhi×2とlo×2と見たときに(unpackするとそうなる)
 	// 128bit整数とみなして1引き算したBitboardを返す。

@@ -724,7 +724,7 @@ Bitboard256 Bitboard256::byte_reverse() const
 // SSE2のunpackを実行して返す。
 // hi_out = _mm256_unpackhi_epi64(lo_in,hi_in);
 // lo_out = _mm256_unpacklo_epi64(lo_in,hi_in);
-void Bitboard256::unpack(const Bitboard256 hi_in,const Bitboard256 lo_in, Bitboard256& hi_out, Bitboard256& lo_out)
+void Bitboard256::unpack(const Bitboard256& hi_in,const Bitboard256& lo_in, Bitboard256& hi_out, Bitboard256& lo_out)
 {
 #if defined(USE_AVX2)
 	hi_out.m = _mm256_unpackhi_epi64(lo_in.m , hi_in.m);
