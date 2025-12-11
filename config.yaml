@@ -6,5 +6,6 @@ data:
   random_fen_skipping: 10
   batch_size: 16384
   num_workers: 8
+  threads: 8
 trainer:
   gpus: 1

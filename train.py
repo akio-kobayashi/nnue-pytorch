@@ -12,8 +12,11 @@ from pytorch_lightning.cli import LightningCLI
 from torch.utils.data import DataLoader
 
 class NNUEDataModule(pl.LightningDataModule):
-    def __init__(self, train: str, val: str, features: str, num_workers: int = 1, batch_size: int = -1, smart_fen_skipping: bool = False, random_fen_skipping: int = 0, epoch_size: int = 10000000, py_data: bool = False):
+    def __init__(self, train: str, val: str, features: str, num_workers: int = 1, batch_size: int = -1, smart_fen_skipping: bool = False, random_fen_skipping: int = 0, epoch_size: int = 10000000, py_data: bool = False, threads: int = -1):
         super().__init__()
+        if threads > 0:
+            print(f'limiting torch to {threads} threads.')
+            t_set_num_threads(threads)
         if batch_size <= 0:
             batch_size = 128 if not torch.cuda.is_available() else 8192
         self.save_hyperparameters()
@@ -58,14 +61,6 @@ class NNUEDataModule(pl.LightningDataModule):
             return DataLoader(self.val_ds, batch_size=None, batch_sampler=None)
 
 def main():
-    # Process a few arguments manually before handing over to LightningCLI
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--threads", default=-1, type=int, help="Number of torch threads to use. Default automatic (cores).")
-    args, _ = parser.parse_known_args()
-    if args.threads > 0:
-        print(f'limiting torch to {args.threads} threads.')
-        t_set_num_threads(args.threads)
-
     # LightningCLI will add arguments for the model, datamodule, and trainer.
     # It will also handle seeding and checkpointing.
     # All model/data/trainer arguments are now passed through the command line
