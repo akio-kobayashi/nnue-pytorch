@@ -6,6 +6,7 @@ import torch.nn.functional as F
 import pytorch_lightning as pl
 import sys
 import math
+import features as features_module
 
 # 3 layer fully connected network
 L1 = 1024
@@ -22,11 +23,12 @@ class NNUE(pl.LightningModule):
   It is not ideal for training a Pytorch quantized model directly.
   """
   def __init__(
-      self, feature_set, lambda_=[1.0], lr=[1.0],
+      self, features, lambda_=[1.0], lr=[1.0],
       label_smoothing_eps=0.0, num_batches_warmup=10000, newbob_decay=0.5,
       num_epochs_to_adjust_lr=500, score_scaling=361, min_newbob_scale=1e-5,
       momentum=0.0, ply_begin_threshold=100.0, ply_end_threshold=120.0):
     super(NNUE, self).__init__()
+    feature_set = features_module.get_feature_set_from_name(features)
     self.input = nn.Linear(feature_set.num_features, L1)
     self.feature_set = feature_set
     self.l1 = nn.Linear(2 * L1, L2)
