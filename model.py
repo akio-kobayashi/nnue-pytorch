@@ -52,6 +52,7 @@ class NNUE(pl.LightningModule):
     self.momentum = momentum
     self.ply_begin_threshold = ply_begin_threshold
     self.ply_end_threshold = ply_end_threshold
+    self.validation_step_outputs = []
 
     self._zero_virtual_feature_weights()
 
@@ -157,10 +158,15 @@ class NNUE(pl.LightningModule):
     return self.step_(batch, batch_idx, 'train_loss')
 
   def validation_step(self, batch, batch_idx):
-    return self.step_(batch, batch_idx, 'val_loss')
+    loss = self.step_(batch, batch_idx, 'val_loss')
+    self.validation_step_outputs.append(loss)
+    return loss
   
-  def validation_epoch_end(self, outputs):
-    self.latest_loss_sum += float(sum(outputs)) / len(outputs);
+  def on_validation_epoch_end(self):
+    if not self.validation_step_outputs:
+      return
+    outputs = self.validation_step_outputs
+    self.latest_loss_sum += float(sum(outputs)) / len(outputs)
     self.latest_loss_count += 1
 
     if self.newbob_decay != 1.0 and self.current_epoch > 0 and self.current_epoch % self.num_epochs_to_adjust_lr == 0:
@@ -184,6 +190,8 @@ class NNUE(pl.LightningModule):
       else:
         self.trainer.should_stop = True
         self.print(f"{self.current_epoch=}, early stopping")
+    
+    self.validation_step_outputs.clear()
 
   def test_step(self, batch, batch_idx):
     self.step_(batch, batch_idx, 'test_loss')
