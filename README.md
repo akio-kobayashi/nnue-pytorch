@@ -1,3 +1,4 @@
+# Logs (if required)
 # Setup
 ```
 python3 -m venv env
