@@ -8,4 +8,5 @@ data:
   num_workers: 8
   threads: 8
 trainer:
-  gpus: 1
+  accelerator: gpu
+  devices: 1
