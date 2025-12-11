@@ -1,3 +1,7 @@
+model:
+  l1_size: 1024
+  l2_size: 8
+  l3_size: 96
 data:
   features: HalfKP
   train: ../train.bin

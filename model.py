@@ -8,11 +8,6 @@ import sys
 import math
 import features as features_module
 
-# 3 layer fully connected network
-L1 = 1024
-L2 = 8
-L3 = 96
-
 class NNUE(pl.LightningModule):
   """
   This model attempts to directly represent the nodchip Stockfish trainer methodology.
@@ -26,14 +21,15 @@ class NNUE(pl.LightningModule):
       self, features, lambda_=[1.0], lr=[1.0],
       label_smoothing_eps=0.0, num_batches_warmup=10000, newbob_decay=0.5,
       num_epochs_to_adjust_lr=500, score_scaling=361, min_newbob_scale=1e-5,
-      momentum=0.0, ply_begin_threshold=100.0, ply_end_threshold=120.0):
+      momentum=0.0, ply_begin_threshold=100.0, ply_end_threshold=120.0,
+      l1_size: int = 1024, l2_size: int = 8, l3_size: int = 96):
     super(NNUE, self).__init__()
     feature_set = features_module.get_feature_set_from_name(features)
-    self.input = nn.Linear(feature_set.num_features, L1)
+    self.input = nn.Linear(feature_set.num_features, l1_size)
     self.feature_set = feature_set
-    self.l1 = nn.Linear(2 * L1, L2)
-    self.l2 = nn.Linear(L2, L3)
-    self.output = nn.Linear(L3, 1)
+    self.l1 = nn.Linear(2 * l1_size, l2_size)
+    self.l2 = nn.Linear(l2_size, l3_size)
+    self.output = nn.Linear(l3_size, 1)
     self.lambda_ = lambda_
     self.lr = lr
     self.label_smoothing_eps = label_smoothing_eps
