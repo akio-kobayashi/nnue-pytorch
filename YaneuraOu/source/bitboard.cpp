@@ -655,7 +655,7 @@ Bitboard Bitboard::byte_reverse() const
 // SSE2のunpackを実行して返す。
 // hi_out = _mm_unpackhi_epi64(lo_in,hi_in);
 // lo_out = _mm_unpacklo_epi64(lo_in,hi_in);
-void Bitboard::unpack(const Bitboard hi_in, const Bitboard lo_in, Bitboard& hi_out, Bitboard& lo_out)
+void Bitboard::unpack(const Bitboard& hi_in, const Bitboard& lo_in, Bitboard& hi_out, Bitboard& lo_out)
 {
 #if defined(USE_SSE2)
 	hi_out.m = _mm_unpackhi_epi64(lo_in.m , hi_in.m);
@@ -671,7 +671,7 @@ void Bitboard::unpack(const Bitboard hi_in, const Bitboard lo_in, Bitboard& hi_o
 
 // 2組のBitboardを、それぞれ64bitのhi×2とlo×2と見たときに(unpackするとそうなる)
 // 128bit整数とみなして1引き算したBitboardを返す。
-void Bitboard::decrement(const Bitboard hi_in,const Bitboard lo_in, Bitboard& hi_out, Bitboard& lo_out)
+void Bitboard::decrement(const Bitboard& hi_in,const Bitboard& lo_in, Bitboard& hi_out, Bitboard& lo_out)
 {
 #if defined(USE_SSE41)
 
@@ -744,7 +744,7 @@ void Bitboard256::unpack(const Bitboard256& hi_in,const Bitboard256& lo_in, Bitb
 
 // 2組のBitboard256を、それぞれ64bitのhi×2とlo×2と見たときに(unpackするとそうなる)
 // 128bit整数とみなして1引き算したBitboardを返す。
-void Bitboard256::decrement(const Bitboard256 hi_in,const Bitboard256 lo_in, Bitboard256& hi_out, Bitboard256& lo_out)
+void Bitboard256::decrement(const Bitboard256& hi_in,const Bitboard256& lo_in, Bitboard256& hi_out, Bitboard256& lo_out)
 {
 #if defined(USE_AVX2)
 

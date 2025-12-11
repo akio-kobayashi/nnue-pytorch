@@ -215,11 +215,11 @@ struct alignas(16) Bitboard
 	// SSE2のunpackを実行して返す。
 	// hi_out = _mm_unpackhi_epi64(lo_in,hi_in);
 	// lo_out = _mm_unpacklo_epi64(lo_in,hi_in);
-	static void unpack(const Bitboard hi_in,const Bitboard lo_in, Bitboard& hi_out, Bitboard& lo_out);
+	static void unpack(const Bitboard& hi_in,const Bitboard& lo_in, Bitboard& hi_out, Bitboard& lo_out);
 
 	// 2組のBitboardを、それぞれ64bitのhi×2とlo×2と見たときに(unpackするとそうなる)
 	// 128bit整数とみなして1引き算したBitboardを返す。
-	static void decrement(const Bitboard hi_in,const Bitboard lo_in, Bitboard& hi_out, Bitboard& lo_out);
+	static void decrement(const Bitboard& hi_in,const Bitboard& lo_in, Bitboard& hi_out, Bitboard& lo_out);
 
 	// このbitboardを128bitレジスタとみなして1減算したBitboardを返す。方向利きの計算で用いる。
 	Bitboard decrement() const;
@@ -414,7 +414,7 @@ struct alignas(32) Bitboard256
 
 	// 2組のBitboard256を、それぞれ64bitのhi×2とlo×2と見たときに(unpackするとそうなる)
 	// 128bit整数とみなして1引き算したBitboardを返す。
-	static void decrement(const Bitboard256 hi_in,const Bitboard256 lo_in, Bitboard256& hi_out, Bitboard256& lo_out);
+	static void decrement(const Bitboard256& hi_in,const Bitboard256& lo_in, Bitboard256& hi_out, Bitboard256& lo_out);
 
 	// 保持している2つの盤面を重ね合わせた(ORした)Bitboardを返す。
 	Bitboard merge() const;
