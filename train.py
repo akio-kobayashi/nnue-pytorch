@@ -3,7 +3,7 @@ import model as M
 import nnue_dataset
 import nnue_bin_dataset
 import pytorch_lightning as pl
-import features
+import features as features_module
 import os
 import torch
 import typing
@@ -20,7 +20,7 @@ class NNUEDataModule(pl.LightningDataModule):
         if batch_size <= 0:
             batch_size = 128 if not torch.cuda.is_available() else 8192
         self.save_hyperparameters()
-        self.feature_set = features.get_feature_set_from_name(self.hparams.features)
+        self.feature_set = features_module.get_feature_set_from_name(self.hparams.features)
 
     def setup(self, stage: typing.Optional[str] = None):
         if not os.path.exists(self.hparams.train):
