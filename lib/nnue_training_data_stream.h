@@ -9,7 +9,9 @@
 #include <string>
 #include <memory>
 
+#ifdef _WIN32
 #include <ppl.h>
+#endif
 
 namespace training_data {
 
@@ -115,10 +117,17 @@ namespace training_data {
                 if (m_stream.read(reinterpret_cast<char*>(&packedSfenValues[0]), sizeof(Learner::PackedSfenValue) * n))
                 {
                     vec.resize(n);
+#ifdef _WIN32
                     concurrency::parallel_for(size_t(0), n, [&vec, &packedSfenValues](size_t i)
                         {
                             vec[i] = packedSfenValueToTrainingDataEntry(packedSfenValues[i]);
                         });
+#else
+                    for (size_t i = 0; i < n; ++i)
+                    {
+                        vec[i] = packedSfenValueToTrainingDataEntry(packedSfenValues[i]);
+                    }
+#endif
                     return;
                 }
                 else
