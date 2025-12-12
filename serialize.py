@@ -269,7 +269,7 @@ def main():
     if args.source.endswith(".pt"):
       nnue = torch.load(args.source)
     else:
-      nnue = M.NNUE.load_from_checkpoint(args.source, feature_set=feature_set)
+      nnue = M.NNUE.load_from_checkpoint(args.source, features=args.features)
     nnue.eval()
     writer = NNUEWriter(nnue, os.path.dirname(args.target))
     with open(args.target, 'wb') as f:
