@@ -2,6 +2,18 @@ model:
   l1_size: 1024
   l2_size: 8
   l3_size: 96
+  lambda_: [1.0]
+  lr: [1.0]
+  label_smoothing_eps: 0.0
+  num_batches_warmup: 10000
+  newbob_decay: 0.5
+  num_epochs_to_adjust_lr: 500
+  score_scaling: 361
+  min_newbob_scale: 1.0e-5
+  momentum: 0.0
+  ply_begin_threshold: 100.0
+  ply_end_threshold: 120.0
+
 data:
   features: HalfKP
   train: ../train.bin
@@ -11,6 +23,9 @@ data:
   batch_size: 16384
   num_workers: 8
   threads: 8
+  epoch_size: 10000000
+  py_data: false
+
 trainer:
   accelerator: gpu
   devices: 1

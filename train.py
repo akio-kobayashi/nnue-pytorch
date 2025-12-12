@@ -70,7 +70,7 @@ def main():
     # It will also handle seeding and checkpointing.
     # All model/data/trainer arguments are now passed through the command line
     # with dot notation, e.g., --model.lambda_ 0.5 or --data.batch_size 8192
-    cli = MyCLI(M.NNUE, NNUEDataModule, save_config_callback=None)
+    cli = MyCLI(M.NNUE, NNUEDataModule, save_config_callback=None, default_config_files=['config.yaml'])
 
 if __name__ == '__main__':
     main()
