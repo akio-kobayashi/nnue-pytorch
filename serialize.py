@@ -35,6 +35,8 @@ class NNUEWriter():
   """
   def __init__(self, model, output_directory_path):
     self.output_directory_path = output_directory_path
+    if not self.output_directory_path:
+      self.output_directory_path = '.'
     os.makedirs(self.output_directory_path, exist_ok=True)
     self.figure_index = 0
     self.buf = bytearray()
