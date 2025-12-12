@@ -43,7 +43,7 @@ class NNUEWriter():
 
     fc_hash = self.fc_hash(model)
     self.write_header(model, fc_hash)
-    self.int32(model.feature_set.hash ^ (M.L1*2)) # Feature transformer hash
+    self.int32(model.feature_set.hash ^ model.l1.in_features) # Feature transformer hash
     self.write_feature_transformer(model)
     self.int32(fc_hash) # FC layers hash
     self.write_fc_layer(model.l1)
@@ -54,7 +54,7 @@ class NNUEWriter():
   def fc_hash(model):
     # InputSlice hash
     prev_hash = 0xEC42E90D
-    prev_hash ^= (M.L1 * 2)
+    prev_hash ^= model.l1.in_features
 
     # Fully connected layers
     layers = [model.l1, model.l2, model.output]
@@ -71,7 +71,7 @@ class NNUEWriter():
 
   def write_header(self, model, fc_hash):
     self.int32(VERSION) # version
-    self.int32(fc_hash ^ model.feature_set.hash ^ (M.L1*2)) # halfkp network hash
+    self.int32(fc_hash ^ model.feature_set.hash ^ model.l1.in_features) # halfkp network hash
     description = b"Features=HalfKP(Friend)[125388->256x2],"
     description += b"Network=AffineTransform[1<-256](ClippedReLU[256](AffineTransform[256<-256]"
     description += b"(ClippedReLU[256](AffineTransform[256<-512](InputSlice[512(0:512)])))))"
@@ -203,7 +203,7 @@ class NNUEReader():
     fc_hash = NNUEWriter.fc_hash(self.model)
 
     self.read_header(feature_set, fc_hash)
-    self.read_int32(feature_set.hash ^ (M.L1*2)) # Feature transformer hash
+    self.read_int32(feature_set.hash ^ self.model.l1.in_features) # Feature transformer hash
     self.read_feature_transformer(self.model.input)
     self.read_int32(fc_hash) # FC layers hash
     self.read_fc_layer(self.model.l1)
@@ -212,7 +212,7 @@ class NNUEReader():
 
   def read_header(self, feature_set, fc_hash):
     self.read_int32(VERSION) # version
-    self.read_int32(fc_hash ^ feature_set.hash ^ (M.L1*2)) # halfkp network hash
+    self.read_int32(fc_hash ^ feature_set.hash ^ self.model.l1.in_features) # halfkp network hash
     desc_len = self.read_int32() # Network definition
     description = self.f.read(desc_len)
 
