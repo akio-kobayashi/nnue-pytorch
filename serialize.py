@@ -72,9 +72,16 @@ class NNUEWriter():
   def write_header(self, model, fc_hash):
     self.int32(VERSION) # version
     self.int32(fc_hash ^ model.feature_set.hash ^ model.l1.in_features) # halfkp network hash
-    description = b"Features=HalfKP(Friend)[125388->256x2],"
-    description += b"Network=AffineTransform[1<-256](ClippedReLU[256](AffineTransform[256<-256]"
-    description += b"(ClippedReLU[256](AffineTransform[256<-512](InputSlice[512(0:512)])))))"
+
+    l1_size = model.l1.in_features // 2
+    l2_size = model.l1.out_features
+    l3_size = model.l2.out_features
+    num_features = model.feature_set.num_features
+
+    description = f"Features={model.feature_set.name}[{num_features}->{l1_size}x2],".encode('ascii')
+    description += f"Network=AffineTransform[1<-{l3_size}](ClippedReLU[{l3_size}](AffineTransform[{l3_size}<-{l2_size}]".encode('ascii')
+    description += f"(ClippedReLU[{l2_size}](AffineTransform[{l2_size}<-{l1_size*2}](InputSlice[{l1_size*2}](0:{l1_size*2}))))))".encode('ascii')
+
     self.int32(len(description)) # Network definition
     self.buf.extend(description)
 
@@ -196,10 +203,10 @@ class NNUEWriter():
     self.buf.extend(struct.pack("<I", v))
 
 class NNUEReader():
-  def __init__(self, f, feature_set):
+  def __init__(self, f, feature_set, l1_size=1024, l2_size=8, l3_size=96):
     self.f = f
     self.feature_set = feature_set
-    self.model = M.NNUE(feature_set)
+    self.model = M.NNUE(feature_set.name, l1_size=l1_size, l2_size=l2_size, l3_size=l3_size)
     fc_hash = NNUEWriter.fc_hash(self.model)
 
     self.read_header(feature_set, fc_hash)
@@ -259,6 +266,9 @@ def main():
   parser.add_argument("source", help="Source file (can be .ckpt, .pt or .nnue)")
   parser.add_argument("target", help="Target file (can be .pt or .nnue)")
   features.add_argparse_args(parser)
+  parser.add_argument("--l1_size", type=int, default=1024)
+  parser.add_argument("--l2_size", type=int, default=8)
+  parser.add_argument("--l3_size", type=int, default=96)
   args = parser.parse_args()
 
   feature_set = features.get_feature_set_from_name(args.features)
@@ -271,7 +281,7 @@ def main():
     if args.source.endswith(".pt"):
       nnue = torch.load(args.source)
     else:
-      nnue = M.NNUE.load_from_checkpoint(args.source, features=args.features)
+      nnue = M.NNUE.load_from_checkpoint(args.source, features=args.features, l1_size=args.l1_size, l2_size=args.l2_size, l3_size=args.l3_size)
     nnue.cpu()
     nnue.eval()
     writer = NNUEWriter(nnue, os.path.dirname(args.target))
@@ -281,7 +291,7 @@ def main():
     if not args.target.endswith(".pt"):
       raise Exception("Target file must end with .pt")
     with open(args.source, 'rb') as f:
-      reader = NNUEReader(f, feature_set)
+      reader = NNUEReader(f, feature_set, l1_size=args.l1_size, l2_size=args.l2_size, l3_size=args.l3_size)
     torch.save(reader.model, args.target)
   else:
     raise Exception('Invalid filetypes: ' + str(args))
