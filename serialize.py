@@ -49,8 +49,27 @@ class NNUEWriter():
     
     # LayerStack (StackedLinear) serialization
     if isinstance(model.l1, M.StackedLinear):
-        for layer in model.l1.layers:
-            self.write_fc_layer(layer)
+        for i in range(model.num_buckets):
+            layer = model.l1.layers[i]
+            # Bias
+            bias = layer.bias.data
+            bias = self.stochastic_round_cpp(bias * 8128.0).to(torch.int32)
+            self.buf.extend(bias.flatten().numpy().tobytes())
+            
+            # Weight
+            weight = layer.weight.data
+            kWeightScale = 8128.0 / 127.0
+            kMaxWeight = 127.0 / kWeightScale
+            weight = self.stochastic_round_cpp(weight.clamp(-kMaxWeight, kMaxWeight) * kWeightScale).to(torch.int8)
+            
+            # Padding to 32
+            num_input = weight.shape[1]
+            if num_input % 32 != 0:
+                num_input += 32 - (num_input % 32)
+                new_w = torch.zeros(weight.shape[0], num_input, dtype=torch.int8)
+                new_w[:, :weight.shape[1]] = weight
+                weight = new_w
+            self.buf.extend(weight.flatten().numpy().tobytes())
     else:
         self.write_fc_layer(model.l1)
         
@@ -61,7 +80,8 @@ class NNUEWriter():
   def fc_hash(model):
     # InputSlice hash
     prev_hash = 0xEC42E90D
-    prev_hash ^= model.input.out_features * 2 # l1.in_features
+    l1_first = model.l1.layers[0] if isinstance(model.l1, M.StackedLinear) else model.l1
+    prev_hash ^= l1_first.in_features # This is l1_size * 2
 
     # Fully connected layers
     # Note: For StackedLinear, we use the first layer for hash calculation
@@ -230,8 +250,19 @@ class NNUEReader():
     self.read_int32(fc_hash) # FC layers hash
     
     if isinstance(self.model.l1, M.StackedLinear):
-        for layer in self.model.l1.layers:
-            self.read_fc_layer(layer)
+        for i in range(self.model.num_buckets):
+            layer = self.model.l1.layers[i]
+            # Bias (int32)
+            kBiasScale = 8128.0
+            layer.bias.data = self.tensor(numpy.int32, layer.bias.shape).divide(kBiasScale)
+            
+            # Weight (int8)
+            kWeightScale = 8128.0 / 127.0
+            non_padded_shape = layer.weight.shape
+            padded_shape = (non_padded_shape[0], ((non_padded_shape[1]+31)//32)*32)
+            layer.weight.data = self.tensor(numpy.int8, padded_shape).divide(kWeightScale)
+            # Strip padding
+            layer.weight.data = layer.weight.data[:non_padded_shape[0], :non_padded_shape[1]]
     else:
         self.read_fc_layer(self.model.l1)
         

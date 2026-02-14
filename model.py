@@ -166,11 +166,11 @@ class NNUE(pl.LightningModule):
     return nnue_output + psqt_output
 
   def step_(self, batch: Tuple, batch_idx: int, loss_type: str) -> torch.Tensor:
-    us_indices, them_indices, white_features, black_features, game_outcome, search_score, current_ply = batch
+    us_indices, them_indices, white_features, black_features, game_outcome, search_score, npm = batch
 
-    # バケットインデックスの計算 (手数 ply に基づく 8バケット分割)
-    # 0-255の範囲を32刻みで 0-7 に変換
-    ls_indices = torch.clamp(current_ply // 32, 0, self.num_buckets - 1).long()
+    # バケットインデックスの計算 (NPMに基づく 8バケット分割)
+    # bucket_index = (16384 - total_non_pawn_material) * 8 / 16384
+    ls_indices = torch.clamp((16384.0 - npm) * 8.0 / 16384.0, 0, self.num_buckets - 1).long()
 
     model_raw_output = self(us_indices, them_indices, white_features, black_features, ls_indices)
     scaled_model_output = model_raw_output * self.NNUE_TO_SCORE_CONSTANT / self.score_scaling

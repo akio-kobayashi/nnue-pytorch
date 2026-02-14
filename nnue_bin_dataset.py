@@ -11,6 +11,15 @@ PACKED_SFEN_VALUE_BYTES = 40
 
 HUFFMAN_MAP = {0b000 : chess.PAWN, 0b001 : chess.KNIGHT, 0b010 : chess.BISHOP, 0b011 : chess.ROOK, 0b100: chess.QUEEN}
 
+PIECE_VALUES = {
+    chess.LANCE: 430,
+    chess.KNIGHT: 581,
+    chess.SILVER: 716,
+    chess.GOLD: 782,
+    chess.BISHOP: 1008,
+    chess.ROOK: 1193,
+}
+
 def twos(v, w):
   return v - int((v << 1) & 2**w)
 
@@ -48,21 +57,22 @@ class ToTensor(object):
     self.features = feature_set
 
   def __call__(self, sample):
-    bd, _, outcome, score = sample
+    bd, _, outcome, score, npm = sample
     us = torch.tensor([bd.turn])
     them = torch.tensor([not bd.turn])
     outcome = torch.tensor([outcome])
     score = torch.tensor([score])
+    npm = torch.tensor([npm])
     white, black = self.features.get_active_features(bd)
-    return us.float(), them.float(), white.float(), black.float(), outcome.float(), score.float()
+    return us.float(), them.float(), white.float(), black.float(), outcome.float(), score.float(), npm.float()
 
 class RandomFlip(object):
   def __call__(self, sample):
-    bd, move, outcome, score = sample
+    bd, move, outcome, score, npm = sample
     mirror = random.choice([False, True])
     if mirror:
       bd = bd.mirror()
-    return bd, move, outcome, score
+    return bd, move, outcome, score, npm
 
 class NNUEBinData(torch.utils.data.Dataset):
   def __init__(self, filename, feature_set):
@@ -92,6 +102,7 @@ class NNUEBinData(torch.utils.data.Dataset):
 
     assert(black_king_sq != white_king_sq)
 
+    npm = 0
     for rank_ in range(8)[::-1]:
       br.refill()
       for file_ in range(8):
@@ -104,6 +115,8 @@ class NNUEBinData(torch.utils.data.Dataset):
           piece = HUFFMAN_MAP[piece_index]
           color = br.readBits(1)
           bd.set_piece_at(i, chess.Piece(piece, not color))
+          if piece in PIECE_VALUES:
+            npm += PIECE_VALUES[piece]
           br.refill()
 
     br.seek(base + 32)
@@ -121,7 +134,8 @@ class NNUEBinData(torch.utils.data.Dataset):
     # 1, 0, -1
     game_result = br.readBits(8)
     outcome = {1: 1.0, 0: 0.5, 255: 0.0}[game_result]
-    return bd, move, outcome, score
+    return bd, move, outcome, score, npm
+
 
   def __getitem__(self, idx):
     item = self.get_raw(idx)
