@@ -69,9 +69,12 @@ data:
   threads: 8
   # 1エポックあたりのデータサイズ。
   epoch_size: 10000000
+  validation_size: 1000000
   # Pythonベースのデータローダーを使用するかどうか。
   # falseの場合、より高速なC++製のデータローダーが使用されます。
   py_data: false
+  py_data_train_num_workers: 4
+  py_data_val_batch_size: 32
 
 # ===============================================================
 # トレーニング環境に関する設定
