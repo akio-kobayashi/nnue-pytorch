@@ -12,7 +12,7 @@ from pytorch_lightning.cli import LightningCLI
 from torch.utils.data import DataLoader
 
 class NNUEDataModule(pl.LightningDataModule):
-    def __init__(self, train: str, val: str, features: str, num_workers: int = 1, batch_size: int = -1, smart_fen_skipping: bool = False, random_fen_skipping: int = 0, epoch_size: int = 10000000, py_data: bool = False, threads: int = -1):
+    def __init__(self, train: str, val: str, features: str, num_workers: int = 1, batch_size: int = -1, smart_fen_skipping: bool = False, random_fen_skipping: int = 0, epoch_size: int = 10000000, validation_size: int = 1000000, py_data: bool = False, py_data_train_num_workers: int = 4, py_data_val_batch_size: int = 32, threads: int = -1):
         super().__init__()
         if threads > 0:
             print(f'limiting torch to {threads} threads.')
@@ -43,20 +43,18 @@ class NNUEDataModule(pl.LightningDataModule):
             val_infinite = nnue_dataset.SparseBatchDataset(self.hparams.features, self.hparams.val, self.hparams.batch_size, filtered=self.hparams.smart_fen_skipping,
                                                            random_fen_skipping=self.hparams.random_fen_skipping, device=main_device)
             self.train_ds = nnue_dataset.FixedNumBatchesDataset(train_infinite, (self.hparams.epoch_size + self.hparams.batch_size - 1) // self.hparams.batch_size)
-            val_size = 1000000 # This was hardcoded in the original script
+            val_size = self.hparams.validation_size
             self.val_ds = nnue_dataset.FixedNumBatchesDataset(val_infinite, (val_size + self.hparams.batch_size - 1) // self.hparams.batch_size)
 
     def train_dataloader(self):
         if self.hparams.py_data:
-            # In original script, num_workers was hardcoded to 4 for py_data
-            return DataLoader(self.train_ds, batch_size=self.hparams.batch_size, shuffle=True, num_workers=4)
+            return DataLoader(self.train_ds, batch_size=self.hparams.batch_size, shuffle=True, num_workers=self.hparams.py_data_train_num_workers)
         else:
             return DataLoader(self.train_ds, batch_size=None, batch_sampler=None)
 
     def val_dataloader(self):
         if self.hparams.py_data:
-            # In original script, batch_size was hardcoded to 32 for py_data validation
-            return DataLoader(self.val_ds, batch_size=32)
+            return DataLoader(self.val_ds, batch_size=self.hparams.py_data_val_batch_size)
         else:
             return DataLoader(self.val_ds, batch_size=None, batch_sampler=None)
 

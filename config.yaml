@@ -24,7 +24,10 @@ data:
   num_workers: 8
   threads: 8
   epoch_size: 10000000
+  validation_size: 1000000
   py_data: false
+  py_data_train_num_workers: 4
+  py_data_val_batch_size: 32
 
 trainer:
   accelerator: gpu
