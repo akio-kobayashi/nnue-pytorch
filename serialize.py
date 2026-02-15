@@ -1,13 +1,9 @@
 import argparse
 import features
-import math
 import model as M
 import numpy
-import nnue_bin_dataset
 import struct
 import torch
-import pytorch_lightning as pl
-from torch.utils.data import DataLoader
 from functools import reduce
 import operator
 import os
@@ -28,6 +24,34 @@ def ascii_hist(name, x, bins=6):
 
 # hardcoded for now
 VERSION = 0x7AF32F16
+WEIGHT_SCALE_BITS = 6
+ACTIVATION_SCALE = 127.0
+OUTPUT_BIAS_SCALE = 9600.0  # kPonanzaConstant * FV_SCALE = 600 * 16 = 9600
+
+
+def _canonical_feature_name(feature_set_name: str) -> str:
+  if feature_set_name.startswith("HalfKP"):
+    return "HalfKP(Friend)"
+  return feature_set_name
+
+
+def _build_network_description(model) -> bytes:
+  l1_size = model.l1.in_features // 2
+  l2_size = model.l1.out_features
+  l3_size = model.l2.out_features
+  num_features = model.feature_set.num_features
+  feature_name = _canonical_feature_name(model.feature_set.name)
+
+  description = f"Features={feature_name}[{num_features}->{l1_size}x2],".encode("ascii")
+  description += (
+      f"Network=AffineTransform[1<-{l3_size}]"
+      f"(ClippedReLU[{l3_size}](AffineTransform[{l3_size}<-{l2_size}]"
+  ).encode("ascii")
+  description += (
+      f"(ClippedReLU[{l2_size}](AffineTransform[{l2_size}<-{l1_size * 2}]"
+      f"(InputSlice[{l1_size * 2}(0:{l1_size * 2})])))))"
+  ).encode("ascii")
+  return description
 
 class NNUEWriter():
   """
@@ -72,19 +96,7 @@ class NNUEWriter():
   def write_header(self, model, fc_hash):
     self.int32(VERSION) # version
     self.int32(fc_hash ^ model.feature_set.hash ^ model.l1.in_features) # halfkp network hash
-
-    l1_size = model.l1.in_features // 2
-    l2_size = model.l1.out_features
-    l3_size = model.l2.out_features
-    num_features = model.feature_set.num_features
-
-    if model.feature_set.name.startswith("HalfKP"):
-      feature_name = "HalfKP(Friend)"
-    else:
-      feature_name = model.feature_set.name
-    description = f"Features={feature_name}[{num_features}->{l1_size}x2],".encode('ascii')
-    description += f"Network=AffineTransform[1<-{l3_size}](ClippedReLU[{l3_size}](AffineTransform[{l3_size}<-{l2_size}]".encode('ascii')
-    description += f"(ClippedReLU[{l2_size}](AffineTransform[{l2_size}<-{l1_size*2}](InputSlice[{l1_size*2}(0:{l1_size*2})])))))".encode('ascii')
+    description = _build_network_description(model)
 
     self.int32(len(description)) # Network definition
     self.buf.extend(description)
@@ -166,14 +178,12 @@ class NNUEWriter():
 
   def write_fc_layer(self, layer, is_output=False):
     # FC layers are stored as int8 weights, and int32 biases
-    kWeightScaleBits = 6
-    kActivationScale = 127.0
     if not is_output:
-      kBiasScale = (1 << kWeightScaleBits) * kActivationScale # = 8128
+      kBiasScale = (1 << WEIGHT_SCALE_BITS) * ACTIVATION_SCALE # = 8128
     else:
-      kBiasScale = 9600.0 # kPonanzaConstant * FV_SCALE = 600 * 16 = 9600
-    kWeightScale = kBiasScale / kActivationScale # = 64.0 for normal layers
-    kMaxWeight = 127.0 / kWeightScale # roughly 2.0
+      kBiasScale = OUTPUT_BIAS_SCALE
+    kWeightScale = kBiasScale / ACTIVATION_SCALE # = 64.0 for normal layers
+    kMaxWeight = ACTIVATION_SCALE / kWeightScale # roughly 2.0
 
     # int32 bias = round(x * kBiasScale)
     # int8 weight = round(x * kWeightScale)
@@ -225,7 +235,7 @@ class NNUEReader():
     self.read_int32(VERSION) # version
     self.read_int32(fc_hash ^ feature_set.hash ^ self.model.l1.in_features) # halfkp network hash
     desc_len = self.read_int32() # Network definition
-    description = self.f.read(desc_len)
+    _ = self.f.read(desc_len)
 
   def tensor(self, dtype, shape):
     d = numpy.fromfile(self.f, dtype, reduce(operator.mul, shape, 1))
@@ -241,13 +251,11 @@ class NNUEReader():
 
   def read_fc_layer(self, layer, is_output=False):
     # FC layers are stored as int8 weights, and int32 biases
-    kWeightScaleBits = 6
-    kActivationScale = 127.0
     if not is_output:
-      kBiasScale = (1 << kWeightScaleBits) * kActivationScale # = 8128
+      kBiasScale = (1 << WEIGHT_SCALE_BITS) * ACTIVATION_SCALE # = 8128
     else:
-      kBiasScale = 9600.0 # kPonanzaConstant * FV_SCALE = 600 * 16 = 9600
-    kWeightScale = kBiasScale / kActivationScale # = 64.0 for normal layers
+      kBiasScale = OUTPUT_BIAS_SCALE
+    kWeightScale = kBiasScale / ACTIVATION_SCALE # = 64.0 for normal layers
 
     # FC inputs are padded to 32 elements for simd.
     non_padded_shape = layer.weight.shape
