@@ -9,6 +9,9 @@ from typing import Any
 from torch.optim import Optimizer
 import features as features_module
 
+Batch = tuple[Tensor, ...]
+
+
 class NNUE(pl.LightningModule):
   """
   This model attempts to directly represent the nodchip Stockfish trainer methodology.
@@ -129,41 +132,43 @@ class NNUE(pl.LightningModule):
     x = self.output(l2_)
     return x
 
-  def step_(self, batch: tuple[Tensor, ...], batch_idx: int, loss_type: str) -> Tensor:
-    us, them, white, black, outcome, score, ply = batch
+  def _compute_lambda(self, ply: Tensor) -> Tensor | float:
+    if self.lambda_[self.parameter_index] >= 0.0:
+      return self.lambda_[self.parameter_index]
+    lambda_ = (self.ply_end_threshold - ply) / (self.ply_end_threshold - self.ply_begin_threshold)
+    return torch.clamp(lambda_, 0.0, 1.0)
 
-    # 600 is the kPonanzaConstant scaling factor needed to convert the training net output to a score.
-    # This needs to match the value used in the serializer
-    scaling = self.score_scaling
-
-    q = self(us, them, white, black) * self.NNUE_TO_SCORE / scaling
+  def _compute_loss_terms(
+      self,
+      q: Tensor,
+      outcome: Tensor,
+      score: Tensor,
+  ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
     t = outcome * (1.0 - self.label_smoothing_eps * 2.0) + self.label_smoothing_eps
-    p = (score / scaling).sigmoid()
-
+    p = (score / self.score_scaling).sigmoid()
     teacher_entropy = -(p * (p + self.EPSILON).log() + (1.0 - p) * (1.0 - p + self.EPSILON).log())
     outcome_entropy = -(t * (t + self.EPSILON).log() + (1.0 - t) * (1.0 - t + self.EPSILON).log())
     teacher_loss = -(p * F.logsigmoid(q) + (1.0 - p) * F.logsigmoid(-q))
     outcome_loss = -(t * F.logsigmoid(q) + (1.0 - t) * F.logsigmoid(-q))
-    if self.lambda_[self.parameter_index] >= 0.0:
-      lambda_ = self.lambda_[self.parameter_index]
-    else:
-      lambda_ = (self.ply_end_threshold - ply) / (self.ply_end_threshold - self.ply_begin_threshold)
-      lambda_ = torch.clamp(lambda_ , 0.0, 1.0)
-    result  = lambda_ * teacher_loss    + (1.0 - lambda_) * outcome_loss
+    return teacher_entropy, outcome_entropy, teacher_loss, outcome_loss
+
+  def step_(self, batch: Batch, batch_idx: int, loss_type: str) -> Tensor:
+    us, them, white, black, outcome, score, ply = batch
+    # 600 is the kPonanzaConstant scaling factor needed to convert the training net output to a score.
+    # This needs to match the value used in the serializer
+    q = self(us, them, white, black) * self.NNUE_TO_SCORE / self.score_scaling
+    teacher_entropy, outcome_entropy, teacher_loss, outcome_loss = self._compute_loss_terms(q, outcome, score)
+    lambda_ = self._compute_lambda(ply)
+    result = lambda_ * teacher_loss + (1.0 - lambda_) * outcome_loss
     entropy = lambda_ * teacher_entropy + (1.0 - lambda_) * outcome_entropy
     loss = result.mean() - entropy.mean()
     self.log(loss_type, loss)
     return loss
 
-    # MSE Loss function for debugging
-    # Scale score by 600.0 to match the expected NNUE scaling factor
-    # output = self(us, them, white, black) * 600.0
-    # loss = F.mse_loss(output, score)
-
-  def training_step(self, batch: tuple[Tensor, ...], batch_idx: int) -> Tensor:
+  def training_step(self, batch: Batch, batch_idx: int) -> Tensor:
     return self.step_(batch, batch_idx, 'train_loss')
 
-  def validation_step(self, batch: tuple[Tensor, ...], batch_idx: int) -> Tensor:
+  def validation_step(self, batch: Batch, batch_idx: int) -> Tensor:
     loss = self.step_(batch, batch_idx, 'val_loss')
     self.validation_step_outputs.append(loss)
     return loss
@@ -199,8 +204,30 @@ class NNUE(pl.LightningModule):
     
     self.validation_step_outputs.clear()
 
-  def test_step(self, batch: tuple[Tensor, ...], batch_idx: int) -> None:
+  def test_step(self, batch: Batch, batch_idx: int) -> None:
     self.step_(batch, batch_idx, 'test_loss')
+
+  def _apply_learning_rate(self, optimizer: Optimizer) -> None:
+    if self.trainer.global_step - self.warmup_start_global_step < self.num_batches_warmup:
+      warmup_scale = min(
+          1.0,
+          float(self.trainer.global_step - self.warmup_start_global_step + 1) / self.num_batches_warmup,
+      )
+    else:
+      warmup_scale = 1.0
+
+    for pg in optimizer.param_groups:
+      pg["lr"] = self.lr[self.parameter_index] * warmup_scale * self.newbob_scale
+      self.log("lr", pg["lr"])
+
+  def _clip_linear_weight(self, layer: nn.Linear) -> None:
+    if layer != self.output:
+      bias_scale = (1 << self.WEIGHT_SCALE_BITS) * self.ACTIVATION_SCALE
+    else:
+      bias_scale = self.NNUE_TO_SCORE * self.FV_SCALE
+    weight_scale = bias_scale / self.ACTIVATION_SCALE
+    max_weight = self.ACTIVATION_SCALE / weight_scale
+    layer.weight.data.clamp_(-max_weight, max_weight)
 
   # learning rate warm-up
   def optimizer_step(
@@ -210,14 +237,7 @@ class NNUE(pl.LightningModule):
       optimizer: Optimizer,
       optimizer_closure: Callable[[], Any],
   ) -> None:
-    # manually warm up lr without a scheduler
-    if self.trainer.global_step - self.warmup_start_global_step < self.num_batches_warmup:
-      warmup_scale = min(1.0, float(self.trainer.global_step - self.warmup_start_global_step + 1) / self.num_batches_warmup)
-    else:
-      warmup_scale = 1.0
-    for pg in optimizer.param_groups:
-      pg["lr"] = self.lr[self.parameter_index] * warmup_scale * self.newbob_scale
-      self.log("lr", pg["lr"])
+    self._apply_learning_rate(optimizer)
 
     # update params
     optimizer.step(closure=optimizer_closure)
@@ -231,13 +251,7 @@ class NNUE(pl.LightningModule):
         continue
 
       # FC layers are stored as int8 weights, and int32 biases
-      if child != self.output:
-        kBiasScale = (1 << self.WEIGHT_SCALE_BITS) * self.ACTIVATION_SCALE
-      else:
-        kBiasScale = self.NNUE_TO_SCORE * self.FV_SCALE
-      kWeightScale = kBiasScale / self.ACTIVATION_SCALE
-      kMaxWeight = self.ACTIVATION_SCALE / kWeightScale
-      child.weight.data.clamp_(-kMaxWeight, kMaxWeight)
+      self._clip_linear_weight(child)
 
   def configure_optimizers(self) -> Optimizer:
     return torch.optim.SGD(self.parameters(), lr=self.lr[0], momentum=self.momentum)
@@ -247,9 +261,8 @@ class NNUE(pl.LightningModule):
     Returns a list of layers.
     filt: Return true to include the given layer.
     """
-    for i in self.children():
-      if filt(i):
-        if isinstance(i, nn.Linear):
-          for p in i.parameters():
-            if p.requires_grad:
-              yield p
+    for module in self.children():
+      if filt(module) and isinstance(module, nn.Linear):
+        for param in module.parameters():
+          if param.requires_grad:
+            yield param
