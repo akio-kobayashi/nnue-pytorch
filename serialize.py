@@ -78,9 +78,13 @@ class NNUEWriter():
     l3_size = model.l2.out_features
     num_features = model.feature_set.num_features
 
-    description = f"Features={model.feature_set.name}[{num_features}->{l1_size}x2],".encode('ascii')
+    if model.feature_set.name.startswith("HalfKP"):
+      feature_name = "HalfKP(Friend)"
+    else:
+      feature_name = model.feature_set.name
+    description = f"Features={feature_name}[{num_features}->{l1_size}x2],".encode('ascii')
     description += f"Network=AffineTransform[1<-{l3_size}](ClippedReLU[{l3_size}](AffineTransform[{l3_size}<-{l2_size}]".encode('ascii')
-    description += f"(ClippedReLU[{l2_size}](AffineTransform[{l2_size}<-{l1_size*2}](InputSlice[{l1_size*2}](0:{l1_size*2}))))))".encode('ascii')
+    description += f"(ClippedReLU[{l2_size}](AffineTransform[{l2_size}<-{l1_size*2}](InputSlice[{l1_size*2}(0:{l1_size*2})])))))".encode('ascii')
 
     self.int32(len(description)) # Network definition
     self.buf.extend(description)
