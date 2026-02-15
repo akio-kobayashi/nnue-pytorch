@@ -1,12 +1,11 @@
-import argparse
 import model as M
 import nnue_dataset
 import nnue_bin_dataset
 import pytorch_lightning as pl
 import features as features_module
-import os
 import torch
 import typing
+from pathlib import Path
 from torch import set_num_threads as t_set_num_threads
 from pytorch_lightning.cli import LightningCLI
 from torch.utils.data import DataLoader
@@ -23,9 +22,9 @@ class NNUEDataModule(pl.LightningDataModule):
         self.feature_set = features_module.get_feature_set_from_name(self.hparams.features)
 
     def setup(self, stage: typing.Optional[str] = None):
-        if not os.path.exists(self.hparams.train):
+        if not Path(self.hparams.train).exists():
             raise FileNotFoundError(f'{self.hparams.train} does not exist')
-        if not os.path.exists(self.hparams.val):
+        if not Path(self.hparams.val).exists():
             raise FileNotFoundError(f'{self.hparams.val} does not exist')
 
         # The C++ data loader needs a device.
