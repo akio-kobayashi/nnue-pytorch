@@ -1,11 +1,12 @@
-import chess
-import ranger
 import torch
 from torch import nn
+from torch import Tensor
 import torch.nn.functional as F
 import pytorch_lightning as pl
 import sys
-import math
+from collections.abc import Callable, Iterator
+from typing import Any
+from torch.optim import Optimizer
 import features as features_module
 
 class NNUE(pl.LightningModule):
@@ -18,12 +19,23 @@ class NNUE(pl.LightningModule):
   It is not ideal for training a Pytorch quantized model directly.
   """
   def __init__(
-      self, features, lambda_=[1.0], lr=[1.0],
-      label_smoothing_eps=0.0, num_batches_warmup=10000, newbob_decay=0.5,
-      num_epochs_to_adjust_lr=500, score_scaling=361, min_newbob_scale=1e-5,
-      momentum=0.0, ply_begin_threshold=100.0, ply_end_threshold=120.0,
+      self, features: str, lambda_: list[float] | None = None, lr: list[float] | None = None,
+      label_smoothing_eps: float = 0.0, num_batches_warmup: int = 10000, newbob_decay: float = 0.5,
+      num_epochs_to_adjust_lr: int = 500, score_scaling: float = 361.0, min_newbob_scale: float = 1e-5,
+      momentum: float = 0.0, ply_begin_threshold: float = 100.0, ply_end_threshold: float = 120.0,
       l1_size: int = 1024, l2_size: int = 8, l3_size: int = 96):
-    super(NNUE, self).__init__()
+    super().__init__()
+    if lambda_ is None:
+      lambda_ = [1.0]
+    if lr is None:
+      lr = [1.0]
+
+    self.NNUE_TO_SCORE = 600.0
+    self.EPSILON = 1e-12
+    self.WEIGHT_SCALE_BITS = 6
+    self.ACTIVATION_SCALE = 127.0
+    self.FV_SCALE = 16.0
+
     feature_set = features_module.get_feature_set_from_name(features)
     self.input = nn.Linear(feature_set.num_features, l1_size)
     self.feature_set = feature_set
@@ -60,7 +72,7 @@ class NNUE(pl.LightningModule):
   we would end up with the real features having effectively unexpected values
   at initialization - following the bell curve based on how many factors there are.
   '''
-  def _zero_virtual_feature_weights(self):
+  def _zero_virtual_feature_weights(self) -> None:
     weights = self.input.weight
     with torch.no_grad():
       for a, b in self.feature_set.get_virtual_feature_ranges():
@@ -71,7 +83,7 @@ class NNUE(pl.LightningModule):
   This method attempts to convert the model from using the self.feature_set
   to new_feature_set.
   '''
-  def set_feature_set(self, new_feature_set):
+  def set_feature_set(self, new_feature_set: Any) -> None:
     if self.feature_set.name == new_feature_set.name:
       return
 
@@ -106,7 +118,7 @@ class NNUE(pl.LightningModule):
     else:
       raise Exception('Cannot change feature set from {} to {}.'.format(self.feature_set.name, new_feature_set.name))
 
-  def forward(self, us, them, w_in, b_in):
+  def forward(self, us: Tensor, them: Tensor, w_in: Tensor, b_in: Tensor) -> Tensor:
     w = self.input(w_in)
     b = self.input(b_in)
     l0_ = (us * torch.cat([w, b], dim=1)) + (them * torch.cat([b, w], dim=1))
@@ -117,21 +129,19 @@ class NNUE(pl.LightningModule):
     x = self.output(l2_)
     return x
 
-  def step_(self, batch, batch_idx, loss_type):
+  def step_(self, batch: tuple[Tensor, ...], batch_idx: int, loss_type: str) -> Tensor:
     us, them, white, black, outcome, score, ply = batch
 
     # 600 is the kPonanzaConstant scaling factor needed to convert the training net output to a score.
     # This needs to match the value used in the serializer
-    nnue2score = 600
     scaling = self.score_scaling
 
-    q = self(us, them, white, black) * nnue2score / scaling
+    q = self(us, them, white, black) * self.NNUE_TO_SCORE / scaling
     t = outcome * (1.0 - self.label_smoothing_eps * 2.0) + self.label_smoothing_eps
     p = (score / scaling).sigmoid()
 
-    epsilon = 1e-12
-    teacher_entropy = -(p * (p + epsilon).log() + (1.0 - p) * (1.0 - p + epsilon).log())
-    outcome_entropy = -(t * (t + epsilon).log() + (1.0 - t) * (1.0 - t + epsilon).log())
+    teacher_entropy = -(p * (p + self.EPSILON).log() + (1.0 - p) * (1.0 - p + self.EPSILON).log())
+    outcome_entropy = -(t * (t + self.EPSILON).log() + (1.0 - t) * (1.0 - t + self.EPSILON).log())
     teacher_loss = -(p * F.logsigmoid(q) + (1.0 - p) * F.logsigmoid(-q))
     outcome_loss = -(t * F.logsigmoid(q) + (1.0 - t) * F.logsigmoid(-q))
     if self.lambda_[self.parameter_index] >= 0.0:
@@ -150,15 +160,15 @@ class NNUE(pl.LightningModule):
     # output = self(us, them, white, black) * 600.0
     # loss = F.mse_loss(output, score)
 
-  def training_step(self, batch, batch_idx):
+  def training_step(self, batch: tuple[Tensor, ...], batch_idx: int) -> Tensor:
     return self.step_(batch, batch_idx, 'train_loss')
 
-  def validation_step(self, batch, batch_idx):
+  def validation_step(self, batch: tuple[Tensor, ...], batch_idx: int) -> Tensor:
     loss = self.step_(batch, batch_idx, 'val_loss')
     self.validation_step_outputs.append(loss)
     return loss
   
-  def on_validation_epoch_end(self):
+  def on_validation_epoch_end(self) -> None:
     if not self.validation_step_outputs:
       return
     outputs = self.validation_step_outputs
@@ -189,17 +199,17 @@ class NNUE(pl.LightningModule):
     
     self.validation_step_outputs.clear()
 
-  def test_step(self, batch, batch_idx):
+  def test_step(self, batch: tuple[Tensor, ...], batch_idx: int) -> None:
     self.step_(batch, batch_idx, 'test_loss')
 
   # learning rate warm-up
   def optimizer_step(
       self,
-      epoch,
-      batch_idx,
-      optimizer,
-      optimizer_closure,
-  ):
+      epoch: int,
+      batch_idx: int,
+      optimizer: Optimizer,
+      optimizer_closure: Callable[[], Any],
+  ) -> None:
     # manually warm up lr without a scheduler
     if self.trainer.global_step - self.warmup_start_global_step < self.num_batches_warmup:
       warmup_scale = min(1.0, float(self.trainer.global_step - self.warmup_start_global_step + 1) / self.num_batches_warmup)
@@ -221,20 +231,18 @@ class NNUE(pl.LightningModule):
         continue
 
       # FC layers are stored as int8 weights, and int32 biases
-      kWeightScaleBits = 6
-      kActivationScale = 127.0
       if child != self.output:
-        kBiasScale = (1 << kWeightScaleBits) * kActivationScale # = 8128
+        kBiasScale = (1 << self.WEIGHT_SCALE_BITS) * self.ACTIVATION_SCALE
       else:
-        kBiasScale = 9600.0 # kPonanzaConstant * FV_SCALE = 600 * 16 = 9600
-      kWeightScale = kBiasScale / kActivationScale # = 64.0 for normal layers
-      kMaxWeight = 127.0 / kWeightScale # roughly 2.0
+        kBiasScale = self.NNUE_TO_SCORE * self.FV_SCALE
+      kWeightScale = kBiasScale / self.ACTIVATION_SCALE
+      kMaxWeight = self.ACTIVATION_SCALE / kWeightScale
       child.weight.data.clamp_(-kMaxWeight, kMaxWeight)
 
-  def configure_optimizers(self):
+  def configure_optimizers(self) -> Optimizer:
     return torch.optim.SGD(self.parameters(), lr=self.lr[0], momentum=self.momentum)
 
-  def get_layers(self, filt):
+  def get_layers(self, filt: Callable[[nn.Module], bool]) -> Iterator[nn.Parameter]:
     """
     Returns a list of layers.
     filt: Return true to include the given layer.
