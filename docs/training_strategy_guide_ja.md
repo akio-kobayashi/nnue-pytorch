@@ -298,3 +298,50 @@ data:
 ```
 
 この設定を基準に、1項目ずつ変更して比較します。
+
+## 8. 外部情報に基づく推奨プロファイル
+
+以下は、NNUE系トレーナーで公開されている推奨設定を本実装向けに読み替えたものです。
+
+### 8.1 推奨プロファイルA（まず最初に試す）
+
+狙い: まず安定して回し、比較基準を作る。
+
+1. Optimizer: `SGD + momentum + warmup`
+2. `batch_size`: 16384
+3. `smart_fen_skipping: true`
+4. `random_fen_skipping: 10`
+5. `ema_enabled: true`（`ema_decay: 0.9995`）
+6. 損失調整は既定値（`teacher_temperature=1.0`, `entropy_coef=1.0`, `outcome_pos_weight=1.0`）
+
+### 8.2 推奨プロファイルB（データが非常に大きい場合）
+
+狙い: 学習時間を抑えつつ、多様な局面を維持する。
+
+1. Aをベースにする
+2. `random_fen_skipping` を 10 前後へ増やす
+3. 必要なら `py_data=false`（C++ローダー）を優先して処理速度を確保
+
+### 8.3 なぜこの値なのか
+
+1. `batch_size=16384` は、公開NNUEトレーナー系で繰り返し使われる実務値です。
+2. `smart_fen_skipping + random_fen_skipping` は、局面の偏りとデータ量の両方を制御しやすい組み合わせです。  
+   特に nodchip の shogi ブランチ README では `random-fen-skipping 10` が推奨例です。
+3. EMAは推論時の揺れを抑えるため、学習戦略の最初の拡張として入れやすいです。
+
+### 8.4 使うときの注意
+
+1. まずAで1本回し、次にBへ進む（同時変更しない）。
+2. 比較は `val_loss` だけでなく、変換後 `.nnue` の対局結果で判断する。
+3. 損失調整パラメータは、A/Bの差が見えてから触る。
+
+## 9. 参照ソース
+
+1. nodchip `nnue-pytorch` shogi ブランチ README（推奨実行例、`random-fen-skipping 10`）  
+   https://github.com/nodchip/nnue-pytorch/tree/shogi.2023-10-29.halfkp_1024x2-8-32
+2. nodchip ブログ（将棋向け実験設定の詳細）  
+   https://nodchip.hatenablog.com/entry/2025/04/20/000000
+3. Lightning公式ドキュメント（`optimizer_step` による warmup 実装方針）  
+   https://lightning.ai/docs/pytorch/stable/advanced/training_tricks.html
+4. HalfKP/NNUE Training Guide（歴史的なNNUE学習設定の背景）  
+   https://github.com/HalfKP/NNUE
