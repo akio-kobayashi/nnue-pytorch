@@ -10,6 +10,10 @@ model:
   gamma: 0.992
   score_scaling: 361
   momentum: 0.0
+  ema_enabled: false
+  ema_decay: 0.9995
+  ema_update_every: 1
+  ema_start_step: 1000
   ply_begin_threshold: 100.0
   ply_end_threshold: 120.0
 

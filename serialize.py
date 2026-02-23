@@ -281,6 +281,7 @@ def main():
   parser.add_argument("--l1_size", type=int, default=1024)
   parser.add_argument("--l2_size", type=int, default=8)
   parser.add_argument("--l3_size", type=int, default=96)
+  parser.add_argument("--use_ema", action="store_true", help="Use EMA weights when exporting from .pt/.ckpt")
   args = parser.parse_args()
 
   feature_set = features.get_feature_set_from_name(args.features)
@@ -294,6 +295,9 @@ def main():
       nnue = torch.load(args.source)
     else:
       nnue = M.NNUE.load_from_checkpoint(args.source, features=args.features, l1_size=args.l1_size, l2_size=args.l2_size, l3_size=args.l3_size)
+    if args.use_ema and hasattr(nnue, "apply_ema_weights"):
+      if not nnue.apply_ema_weights():
+        raise RuntimeError("Requested --use_ema but no EMA weights were found in the source model/checkpoint.")
     nnue.cpu()
     nnue.eval()
     writer = NNUEWriter(nnue, os.path.dirname(args.target))
