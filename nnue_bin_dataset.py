@@ -57,22 +57,23 @@ class ToTensor(object):
     self.features = feature_set
 
   def __call__(self, sample):
-    bd, _, outcome, score, npm = sample
+    bd, _, outcome, score, ply, npm = sample
     us = torch.tensor([bd.turn])
     them = torch.tensor([not bd.turn])
     outcome = torch.tensor([outcome])
     score = torch.tensor([score])
+    ply = torch.tensor([ply])
     npm = torch.tensor([npm])
     white, black = self.features.get_active_features(bd)
-    return us.float(), them.float(), white.float(), black.float(), outcome.float(), score.float(), npm.float()
+    return us.float(), them.float(), white.float(), black.float(), outcome.float(), score.float(), ply.float(), npm.float()
 
 class RandomFlip(object):
   def __call__(self, sample):
-    bd, move, outcome, score, npm = sample
+    bd, move, outcome, score, ply, npm = sample
     mirror = random.choice([False, True])
     if mirror:
       bd = bd.mirror()
-    return bd, move, outcome, score, npm
+    return bd, move, outcome, score, ply, npm
 
 class NNUEBinData(torch.utils.data.Dataset):
   def __init__(self, filename, feature_set):
@@ -134,7 +135,7 @@ class NNUEBinData(torch.utils.data.Dataset):
     # 1, 0, -1
     game_result = br.readBits(8)
     outcome = {1: 1.0, 0: 0.5, 255: 0.0}[game_result]
-    return bd, move, outcome, score, npm
+    return bd, move, outcome, score, ply, npm
 
 
   def __getitem__(self, idx):

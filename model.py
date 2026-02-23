@@ -165,7 +165,13 @@ class NNUE(pl.LightningModule):
     return nnue_output + psqt_output
 
   def step_(self, batch: Tuple, batch_idx: int, loss_type: str) -> torch.Tensor:
-    us_indices, them_indices, white_features, black_features, game_outcome, search_score, npm = batch
+    if len(batch) == 8:
+      us_indices, them_indices, white_features, black_features, game_outcome, search_score, current_ply, npm = batch
+    elif len(batch) == 7:
+      us_indices, them_indices, white_features, black_features, game_outcome, search_score, npm = batch
+      current_ply = None
+    else:
+      raise ValueError(f'Unexpected batch format (len={len(batch)}). Expected 7 or 8 tensors.')
 
     # バケットインデックスの計算 (NPMに基づく num_buckets 分割)
     # bucket_index = (16384 - total_non_pawn_material) * num_buckets / 16384
@@ -191,6 +197,8 @@ class NNUE(pl.LightningModule):
     if self.lambda_[0] >= 0.0:
       current_lambda = self.lambda_[0]
     else:
+      if current_ply is None:
+        raise ValueError('Dynamic lambda is enabled (lambda_ < 0), but ply is missing from the batch.')
       current_lambda = (self.ply_end_threshold - current_ply) / (self.ply_end_threshold - self.ply_begin_threshold)
       current_lambda = torch.clamp(current_lambda , 0.0, 1.0)
     

@@ -16,7 +16,8 @@ def make_data_reader(data_path, feature_set):
     return nnue_bin_dataset.NNUEBinData(data_path, feature_set)
 
 def eval_model_batch(model, batch):
-    us, them, white, black, outcome, score = batch.contents.get_tensors('cpu')
+    tensors = batch.contents.get_tensors('cpu')
+    us, them, white, black = tensors[:4]
 
     evals = [v.item() for v in model.forward(us, them, white, black) * 600.0]
     for i in range(len(evals)):

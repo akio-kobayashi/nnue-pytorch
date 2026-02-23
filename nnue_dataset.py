@@ -34,7 +34,7 @@ class SparseBatch(ctypes.Structure):
         white_values = torch.from_numpy(np.ctypeslib.as_array(self.white_values, shape=(self.num_active_white_features,))).pin_memory().to(device=device, non_blocking=True)
         black_values = torch.from_numpy(np.ctypeslib.as_array(self.black_values, shape=(self.num_active_black_features,))).pin_memory().to(device=device, non_blocking=True)
         iw = torch.transpose(torch.from_numpy(np.ctypeslib.as_array(self.white, shape=(self.num_active_white_features, 2))).pin_memory().to(device=device, non_blocking=True), 0, 1).long()
-        ib = torch.transpose(torch.from_numpy(np.ctypeslib.as_array(self.black, shape=(self.num_active_white_features, 2))).pin_memory().to(device=device, non_blocking=True), 0, 1).long()
+        ib = torch.transpose(torch.from_numpy(np.ctypeslib.as_array(self.black, shape=(self.num_active_black_features, 2))).pin_memory().to(device=device, non_blocking=True), 0, 1).long()
         us = torch.from_numpy(np.ctypeslib.as_array(self.is_white, shape=(self.size, 1))).pin_memory().to(device=device, non_blocking=True)
         them = 1.0 - us
         outcome = torch.from_numpy(np.ctypeslib.as_array(self.outcome, shape=(self.size, 1))).pin_memory().to(device=device, non_blocking=True)
@@ -45,7 +45,7 @@ class SparseBatch(ctypes.Structure):
         black._coalesced_(True)
         ply = torch.from_numpy(np.ctypeslib.as_array(self.ply, shape=(self.size, 1))).pin_memory().to(device=device, non_blocking=True)
         npm = torch.from_numpy(np.ctypeslib.as_array(self.npm, shape=(self.size, 1))).pin_memory().to(device=device, non_blocking=True)
-        return us, them, white, black, outcome, score, npm
+        return us, them, white, black, outcome, score, ply, npm
 
 SparseBatchPtr = ctypes.POINTER(SparseBatch)
 
