@@ -1,4 +1,7 @@
 # Logs (if required)
+# Training Strategy Guide (Japanese)
+- `docs/training_strategy_guide_ja.md` : 従来戦略と拡張戦略（EMA / 損失調整 / サンプリング）の学習ガイド
+
 # Setup
 ```
 python3 -m venv env
