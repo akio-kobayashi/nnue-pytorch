@@ -39,6 +39,22 @@
 - `outcome` は「最終的に勝ったか負けたか」を学びます。
 - `lambda_` は、短期的な探索評価と最終結果のどちらを重く見るかのつまみです。
 
+### 2.1.1 出力は何を表すか（評価値と勝率）
+
+このモデルの生出力はスカラー評価値ですが、学習時は最終的に「勝率」と整合する形で扱います。
+
+1. 探索スコア由来の教師確率  
+   `p = sigmoid(score / (score_scaling * teacher_temperature))`
+2. 対局結果由来の教師確率  
+   `t = outcome`（必要なら label smoothing を適用）
+3. モデル出力側も sigmoid を通すと勝率として解釈可能  
+   `q_prob = sigmoid(model_score_scaled)`
+
+要点:
+
+- `score_scaling` は評価値スケールを確率変換に合わせるための係数です。
+- 実験結果を読むときは、`loss` だけでなく「勝率解釈で不自然な偏りがないか」も確認します。
+
 ### 2.2 最適化
 
 - Optimizer: SGD + Momentum
@@ -58,6 +74,13 @@
 - 既存の間引き:
   - `data.smart_fen_skipping`
   - `data.random_fen_skipping`
+
+各オプションの意味:
+
+1. `smart_fen_skipping`  
+   静かな局面中心にするためのフィルタ。学習対象を絞ってノイズを減らす意図があります。
+2. `random_fen_skipping`  
+   平均的に局面を間引く設定。データ量が非常に大きいときに、速度と多様性のバランスを取ります。
 
 ## 3. 拡張戦略（今回追加）
 
@@ -146,6 +169,19 @@
 
 - この拡張は `data.py_data: true` のとき有効です。
 - `uniform` は従来相当（互換モード）です。
+
+各オプションの意味:
+
+1. `py_data_sampling_mode=uniform`  
+   単純一様サンプリング。基準比較用のモードです。
+2. `py_data_sampling_mode=ply_balanced`  
+   手数（ply）帯ごとの偏りを減らすモードです。序中終盤の学習バランス改善を狙います。
+3. `py_data_sampling_bins`  
+   ply を何分割するか。増やすと粒度は上がりますが、各binのサンプル不足に注意が必要です。
+4. `py_data_sampling_max_positions`  
+   サンプリング用に参照する局面上限。0 は全件参照です。大規模データでは前処理時間短縮に有効です。
+5. `py_data_sampling_seed`  
+   再現性確保用の乱数種です。比較実験では固定します。
 
 意味:
 
