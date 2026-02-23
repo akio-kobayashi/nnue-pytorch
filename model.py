@@ -28,7 +28,8 @@ class NNUE(pl.LightningModule):
       num_epochs_to_adjust_lr: int = 500, score_scaling: float = 361.0, min_newbob_scale: float = 1e-5,
       momentum: float = 0.0, ply_begin_threshold: float = 100.0, ply_end_threshold: float = 120.0,
       l1_size: int = 1024, l2_size: int = 8, l3_size: int = 96,
-      ema_enabled: bool = False, ema_decay: float = 0.9995, ema_update_every: int = 1, ema_start_step: int = 1000):
+      ema_enabled: bool = False, ema_decay: float = 0.9995, ema_update_every: int = 1, ema_start_step: int = 1000,
+      teacher_temperature: float = 1.0, entropy_coef: float = 1.0, outcome_pos_weight: float = 1.0):
     super().__init__()
     if lambda_ is None:
       lambda_ = [1.0]
@@ -72,6 +73,9 @@ class NNUE(pl.LightningModule):
     self.ema_start_step = max(0, int(ema_start_step))
     self._ema_state: TensorDict = {}
     self._ema_backup: TensorDict | None = None
+    self.teacher_temperature = max(float(teacher_temperature), self.EPSILON)
+    self.entropy_coef = float(entropy_coef)
+    self.outcome_pos_weight = max(float(outcome_pos_weight), self.EPSILON)
 
     self._zero_virtual_feature_weights()
 
@@ -153,11 +157,14 @@ class NNUE(pl.LightningModule):
       score: Tensor,
   ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
     t = outcome * (1.0 - self.label_smoothing_eps * 2.0) + self.label_smoothing_eps
-    p = (score / self.score_scaling).sigmoid()
+    p = (score / (self.score_scaling * self.teacher_temperature)).sigmoid()
     teacher_entropy = -(p * (p + self.EPSILON).log() + (1.0 - p) * (1.0 - p + self.EPSILON).log())
     outcome_entropy = -(t * (t + self.EPSILON).log() + (1.0 - t) * (1.0 - t + self.EPSILON).log())
     teacher_loss = -(p * F.logsigmoid(q) + (1.0 - p) * F.logsigmoid(-q))
-    outcome_loss = -(t * F.logsigmoid(q) + (1.0 - t) * F.logsigmoid(-q))
+    outcome_loss = -(
+        self.outcome_pos_weight * t * F.logsigmoid(q)
+        + (1.0 - t) * F.logsigmoid(-q)
+    )
     return teacher_entropy, outcome_entropy, teacher_loss, outcome_loss
 
   def step_(self, batch: Batch, batch_idx: int, loss_type: str) -> Tensor:
@@ -169,7 +176,7 @@ class NNUE(pl.LightningModule):
     lambda_ = self._compute_lambda(ply)
     result = lambda_ * teacher_loss + (1.0 - lambda_) * outcome_loss
     entropy = lambda_ * teacher_entropy + (1.0 - lambda_) * outcome_entropy
-    loss = result.mean() - entropy.mean()
+    loss = result.mean() - self.entropy_coef * entropy.mean()
     self.log(loss_type, loss)
     return loss
 

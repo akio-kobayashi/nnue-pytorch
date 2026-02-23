@@ -14,6 +14,9 @@ model:
   ema_decay: 0.9995
   ema_update_every: 1
   ema_start_step: 1000
+  teacher_temperature: 1.0
+  entropy_coef: 1.0
+  outcome_pos_weight: 1.0
   ply_begin_threshold: 100.0
   ply_end_threshold: 120.0
 
