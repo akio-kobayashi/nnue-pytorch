@@ -167,9 +167,9 @@ class NNUE(pl.LightningModule):
   def step_(self, batch: Tuple, batch_idx: int, loss_type: str) -> torch.Tensor:
     us_indices, them_indices, white_features, black_features, game_outcome, search_score, npm = batch
 
-    # バケットインデックスの計算 (NPMに基づく 8バケット分割)
-    # bucket_index = (16384 - total_non_pawn_material) * 8 / 16384
-    ls_indices = torch.clamp((16384.0 - npm) * 8.0 / 16384.0, 0, self.num_buckets - 1).long()
+    # バケットインデックスの計算 (NPMに基づく num_buckets 分割)
+    # bucket_index = (16384 - total_non_pawn_material) * num_buckets / 16384
+    ls_indices = torch.clamp((16384.0 - npm) * float(self.num_buckets) / 16384.0, 0, self.num_buckets - 1).long()
 
     model_raw_output = self(us_indices, them_indices, white_features, black_features, ls_indices)
     scaled_model_output = model_raw_output * self.NNUE_TO_SCORE_CONSTANT / self.score_scaling

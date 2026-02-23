@@ -269,6 +269,7 @@ struct SparseBatch
         white_values = new float[size * FeatureSet<Ts...>::MAX_ACTIVE_FEATURES];
         black_values = new float[size * FeatureSet<Ts...>::MAX_ACTIVE_FEATURES];
         ply = new float[size];
+        npm = new float[size];
 
         num_active_white_features = 0;
         num_active_black_features = 0;
@@ -295,6 +296,7 @@ struct SparseBatch
     float* white_values;
     float* black_values;
     float* ply;
+    float* npm;
 
     ~SparseBatch()
     {
@@ -306,6 +308,7 @@ struct SparseBatch
         delete[] white_values;
         delete[] black_values;
         delete[] ply;
+        delete[] npm;
     }
 
 private:
@@ -317,7 +320,24 @@ private:
         outcome[i] = (e.result + 1.0f) / 2.0f;
         score[i] = e.score;
         ply[i] = e.ply;
+        npm[i] = static_cast<float>(compute_non_pawn_material(*e.pos));
         fill_features(FeatureSet<Ts...>{}, i, e);
+    }
+
+    static int compute_non_pawn_material(const Position& pos)
+    {
+        return
+            (pos.pieces(BLACK, LANCE).pop_count() + pos.pieces(WHITE, LANCE).pop_count()
+                + pos.pieces(BLACK, PRO_LANCE).pop_count() + pos.pieces(WHITE, PRO_LANCE).pop_count()) * 430
+          + (pos.pieces(BLACK, KNIGHT).pop_count() + pos.pieces(WHITE, KNIGHT).pop_count()
+                + pos.pieces(BLACK, PRO_KNIGHT).pop_count() + pos.pieces(WHITE, PRO_KNIGHT).pop_count()) * 581
+          + (pos.pieces(BLACK, SILVER).pop_count() + pos.pieces(WHITE, SILVER).pop_count()
+                + pos.pieces(BLACK, PRO_SILVER).pop_count() + pos.pieces(WHITE, PRO_SILVER).pop_count()) * 716
+          + (pos.pieces(BLACK, GOLD).pop_count() + pos.pieces(WHITE, GOLD).pop_count()) * 782
+          + (pos.pieces(BLACK, BISHOP).pop_count() + pos.pieces(WHITE, BISHOP).pop_count()
+                + pos.pieces(BLACK, HORSE).pop_count() + pos.pieces(WHITE, HORSE).pop_count()) * 1008
+          + (pos.pieces(BLACK, ROOK).pop_count() + pos.pieces(WHITE, ROOK).pop_count()
+                + pos.pieces(BLACK, DRAGON).pop_count() + pos.pieces(WHITE, DRAGON).pop_count()) * 1193;
     }
 
     template <typename... Ts>
