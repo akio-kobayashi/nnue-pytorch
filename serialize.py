@@ -13,6 +13,7 @@ import operator
 import os
 import matplotlib.pyplot as plt
 import datetime
+import sys
 
 def ascii_hist(name, x, bins=6):
   N,X = numpy.histogram(x, bins=bins)
@@ -29,21 +30,26 @@ def ascii_hist(name, x, bins=6):
 # hardcoded for now
 VERSION = 0x7AF32F16
 
+if sys.version_info < (3, 10):
+  raise RuntimeError(f"Python 3.10+ is required. Detected: {sys.version}")
+
 class NNUEWriter():
   """
   All values are stored in little endian.
   """
-  def __init__(self, model, output_directory_path):
+  def __init__(self, model, output_directory_path, target_engine='stockfish', yane_network_hash=VERSION):
     self.output_directory_path = output_directory_path
     if not self.output_directory_path:
       self.output_directory_path = '.'
     os.makedirs(self.output_directory_path, exist_ok=True)
     self.figure_index = 0
     self.buf = bytearray()
+    self.target_engine = target_engine
+    self.yane_network_hash = yane_network_hash
 
     fc_hash = self.fc_hash(model)
     self.write_header(model, fc_hash)
-    self.int32(model.feature_set.hash ^ model.input.in_features) # Feature transformer hash
+    self.int32(self.feature_transformer_hash(model)) # Feature transformer hash
     self.write_feature_transformer(model)
     self.int32(fc_hash) # FC layers hash
     
@@ -99,9 +105,23 @@ class NNUEWriter():
       prev_hash = layer_hash
     return layer_hash
 
+  def feature_transformer_hash(self, model):
+    if self.target_engine == 'yaneuraou':
+      # YaneuraOu: RawFeatureHash ^ kOutputDimensions (kOutputDimensions = l1_size * 2)
+      return model.feature_set.hash ^ (model.input.out_features * 2)
+    # Stockfish-style default used by this serializer previously
+    return model.feature_set.hash ^ model.input.in_features
+
+  def header_hash(self, model, fc_hash):
+    if self.target_engine == 'yaneuraou':
+      # YaneuraOu kHashValue = FeatureTransformerHash ^ NetworkHash
+      return self.feature_transformer_hash(model) ^ self.yane_network_hash
+    # Stockfish-style default used by this serializer previously
+    return fc_hash ^ model.feature_set.hash ^ model.input.in_features
+
   def write_header(self, model, fc_hash):
     self.int32(VERSION) # version
-    self.int32(fc_hash ^ model.feature_set.hash ^ model.input.in_features) # hash
+    self.int32(self.header_hash(model, fc_hash)) # hash
     
     l1_size = model.input.out_features
     l2_size = model.l2.in_features
@@ -218,7 +238,7 @@ class NNUEWriter():
     clipped = torch.count_nonzero(weight.clamp(-kMaxWeight, kMaxWeight) - weight)
     total_elements = torch.numel(weight)
     clipped_max = torch.max(torch.abs(weight.clamp(-kMaxWeight, kMaxWeight) - weight))
-    print("layer has {}/{} clipped weights. Exceeding by {} the maximum {}.".format(clipped, total_elements, clipped_max, kMaxWeight))
+    print(f"layer has {clipped}/{total_elements} clipped weights. Exceeding by {clipped_max} the maximum {kMaxWeight}.")
     weight = self.stochastic_round_cpp(weight.clamp(-kMaxWeight, kMaxWeight) * kWeightScale).to(torch.int8)
     ascii_hist('fc weight:', weight.numpy())
     self.save_histogram(f'{self.figure_index:02}_fully_connected_layer_weight.png', weight, 'weight', 'frequency', 'fully connected layer weight')
@@ -238,14 +258,16 @@ class NNUEWriter():
     self.buf.extend(struct.pack("<I", v))
 
 class NNUEReader():
-  def __init__(self, f, feature_set, l1_size=1024, l2_size=8, l3_size=96, num_buckets=8):
+  def __init__(self, f, feature_set, l1_size=1024, l2_size=8, l3_size=96, num_buckets=8, target_engine='stockfish', yane_network_hash=VERSION):
     self.f = f
     self.feature_set = feature_set
     self.model = M.NNUE(feature_set.name, l1_size=l1_size, l2_size=l2_size, l3_size=l3_size, num_buckets=num_buckets)
+    self.target_engine = target_engine
+    self.yane_network_hash = yane_network_hash
     fc_hash = NNUEWriter.fc_hash(self.model)
 
     self.read_header(feature_set, fc_hash)
-    self.read_int32(feature_set.hash ^ self.model.input.in_features) # Feature transformer hash
+    self.read_int32(self.feature_transformer_hash()) # Feature transformer hash
     self.read_feature_transformer(self.model.input)
     self.read_int32(fc_hash) # FC layers hash
     
@@ -269,9 +291,19 @@ class NNUEReader():
     self.read_fc_layer(self.model.l2)
     self.read_fc_layer(self.model.output, is_output=True)
 
+  def feature_transformer_hash(self):
+    if self.target_engine == 'yaneuraou':
+      return self.feature_set.hash ^ (self.model.input.out_features * 2)
+    return self.feature_set.hash ^ self.model.input.in_features
+
+  def expected_header_hash(self, fc_hash):
+    if self.target_engine == 'yaneuraou':
+      return self.feature_transformer_hash() ^ self.yane_network_hash
+    return fc_hash ^ self.feature_set.hash ^ self.model.input.in_features
+
   def read_header(self, feature_set, fc_hash):
     self.read_int32(VERSION) # version
-    self.read_int32(fc_hash ^ feature_set.hash ^ self.model.input.in_features) # hash
+    self.read_int32(self.expected_header_hash(fc_hash)) # hash
     desc_len = self.read_int32() # Network definition
     description = self.f.read(desc_len)
 
@@ -310,7 +342,7 @@ class NNUEReader():
   def read_int32(self, expected=None):
     v = struct.unpack("<I", self.f.read(4))[0]
     if expected is not None and v != expected:
-      raise Exception("Expected: %x, got %x" % (expected, v))
+      raise Exception(f"Expected: 0x{expected:x}, got 0x{v:x}")
     return v
 
 def main():
@@ -322,11 +354,14 @@ def main():
   parser.add_argument("--l2_size", type=int, default=8)
   parser.add_argument("--l3_size", type=int, default=96)
   parser.add_argument("--num_buckets", type=int, default=8)
+  parser.add_argument("--target-engine", choices=["stockfish", "yaneuraou"], default="stockfish")
+  parser.add_argument("--yane-network-hash", type=lambda x: int(x, 0), default=VERSION,
+                      help="Used only when --target-engine yaneuraou. Default is VERSION (0x7AF32F16).")
   args = parser.parse_args()
 
   feature_set = features.get_feature_set_from_name(args.features)
 
-  print('Converting %s to %s' % (args.source, args.target))
+  print(f"Converting {args.source} to {args.target}")
 
   if args.source.endswith(".pt") or args.source.endswith(".ckpt"):
     if not args.target.endswith(".nnue"):
@@ -337,14 +372,28 @@ def main():
       nnue = M.NNUE.load_from_checkpoint(args.source, features=args.features, l1_size=args.l1_size, l2_size=args.l2_size, l3_size=args.l3_size, num_buckets=args.num_buckets)
     nnue.cpu()
     nnue.eval()
-    writer = NNUEWriter(nnue, os.path.dirname(args.target))
+    writer = NNUEWriter(
+      nnue,
+      os.path.dirname(args.target),
+      target_engine=args.target_engine,
+      yane_network_hash=args.yane_network_hash,
+    )
     with open(args.target, 'wb') as f:
       f.write(writer.buf)
   elif args.source.endswith(".nnue"):
     if not args.target.endswith(".pt"):
       raise Exception("Target file must end with .pt")
     with open(args.source, 'rb') as f:
-      reader = NNUEReader(f, feature_set, l1_size=args.l1_size, l2_size=args.l2_size, l3_size=args.l3_size, num_buckets=args.num_buckets)
+      reader = NNUEReader(
+        f,
+        feature_set,
+        l1_size=args.l1_size,
+        l2_size=args.l2_size,
+        l3_size=args.l3_size,
+        num_buckets=args.num_buckets,
+        target_engine=args.target_engine,
+        yane_network_hash=args.yane_network_hash,
+      )
     torch.save(reader.model, args.target)
   else:
     raise Exception('Invalid filetypes: ' + str(args))
