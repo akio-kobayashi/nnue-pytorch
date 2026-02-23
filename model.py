@@ -3,7 +3,6 @@ from torch import nn
 from torch import Tensor
 import torch.nn.functional as F
 import pytorch_lightning as pl
-import sys
 from collections.abc import Callable, Iterator
 from typing import Any
 from torch.optim import Optimizer
@@ -24,8 +23,8 @@ class NNUE(pl.LightningModule):
   """
   def __init__(
       self, features: str, lambda_: list[float] | None = None, lr: list[float] | None = None,
-      label_smoothing_eps: float = 0.0, num_batches_warmup: int = 10000, newbob_decay: float = 0.5,
-      num_epochs_to_adjust_lr: int = 500, score_scaling: float = 361.0, min_newbob_scale: float = 1e-5,
+      label_smoothing_eps: float = 0.0, num_batches_warmup: int = 10000,
+      score_scaling: float = 361.0,
       momentum: float = 0.0, ply_begin_threshold: float = 100.0, ply_end_threshold: float = 120.0,
       l1_size: int = 1024, l2_size: int = 8, l3_size: int = 96,
       ema_enabled: bool = False, ema_decay: float = 0.9995, ema_update_every: int = 1, ema_start_step: int = 1000,
@@ -52,17 +51,9 @@ class NNUE(pl.LightningModule):
     self.lr = lr
     self.label_smoothing_eps = label_smoothing_eps
     self.num_batches_warmup = num_batches_warmup
-    self.newbob_scale = 1.0
-    self.newbob_decay = newbob_decay
-    self.best_loss = 1e10
-    self.num_epochs_to_adjust_lr = num_epochs_to_adjust_lr
-    self.latest_loss_sum = 0.0
-    self.latest_loss_count = 0
     self.score_scaling = score_scaling
     # Warmupを開始するステップ数
     self.warmup_start_global_step = 0
-    self.min_newbob_scale = min_newbob_scale
-    self.parameter_index = 0
     self.momentum = momentum
     self.ply_begin_threshold = ply_begin_threshold
     self.ply_end_threshold = ply_end_threshold
@@ -145,8 +136,9 @@ class NNUE(pl.LightningModule):
     return x
 
   def _compute_lambda(self, ply: Tensor) -> Tensor | float:
-    if self.lambda_[self.parameter_index] >= 0.0:
-      return self.lambda_[self.parameter_index]
+    lambda_base = self.lambda_[0]
+    if lambda_base >= 0.0:
+      return lambda_base
     lambda_ = (self.ply_end_threshold - ply) / (self.ply_end_threshold - self.ply_begin_threshold)
     return torch.clamp(lambda_, 0.0, 1.0)
 
@@ -257,32 +249,6 @@ class NNUE(pl.LightningModule):
     try:
       if not self.validation_step_outputs:
         return
-      outputs = self.validation_step_outputs
-      self.latest_loss_sum += float(sum(outputs)) / len(outputs)
-      self.latest_loss_count += 1
-
-      if self.newbob_decay != 1.0 and self.current_epoch > 0 and self.current_epoch % self.num_epochs_to_adjust_lr == 0:
-        latest_loss = self.latest_loss_sum / self.latest_loss_count
-        self.latest_loss_sum = 0.0
-        self.latest_loss_count = 0
-        if latest_loss < self.best_loss:
-          self.print(f"{self.current_epoch=}, {latest_loss=} < {self.best_loss=}, accepted, {self.newbob_scale=}")
-          sys.stdout.flush()
-          self.best_loss = latest_loss
-        else:
-          self.newbob_scale *= self.newbob_decay
-          self.print(f"{self.current_epoch=}, {latest_loss=} >= {self.best_loss=}, rejected, {self.newbob_scale=}")
-          sys.stdout.flush()
-      
-      if self.newbob_scale < self.min_newbob_scale:
-        self.parameter_index += 1
-        if self.parameter_index < len(self.lr):
-          self.best_loss = 1e10
-          self.newbob_scale = 1.0
-        else:
-          self.trainer.should_stop = True
-          self.print(f"{self.current_epoch=}, early stopping")
-      
       self.validation_step_outputs.clear()
     finally:
       self.restore_original_weights()
@@ -323,7 +289,7 @@ class NNUE(pl.LightningModule):
       warmup_scale = 1.0
 
     for pg in optimizer.param_groups:
-      pg["lr"] = self.lr[self.parameter_index] * warmup_scale * self.newbob_scale
+      pg["lr"] = self.lr[0] * warmup_scale
       self.log("lr", pg["lr"])
 
   def _clip_linear_weight(self, layer: nn.Linear) -> None:
