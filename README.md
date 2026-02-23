@@ -2,6 +2,12 @@
 # Training Strategy Guide (Japanese)
 - `docs/training_strategy_guide_ja.md` : 従来戦略と拡張戦略（EMA / 損失調整 / サンプリング）の学習ガイド
 
+# Current training strategy
+- Optimizer: SGD + momentum + warmup (`model.num_batches_warmup`)
+- Optional stabilization: EMA (`model.ema_*`)
+- Optional loss tuning: `model.teacher_temperature`, `model.entropy_coef`, `model.outcome_pos_weight`
+- Optional sampling extension (`py_data=true`): `data.py_data_sampling_mode` (`uniform` / `ply_balanced`)
+
 # Setup
 ```
 python3 -m venv env
@@ -67,6 +73,10 @@ you can export to SF NNUE format.  This will convert `last.ckpt`
 to `nn.nnue`, which you can load directly in SF.
 ```
 python serialize.py last.ckpt nn.nnue
+```
+To export EMA weights:
+```
+python serialize.py --use_ema last.ckpt nn.nnue
 ```
 
 # Import a network

@@ -28,7 +28,6 @@
 - Optimizer: SGD + Momentum
 - 学習率:
   - warmup (`model.num_batches_warmup`)
-  - Newbob系調整 (`model.newbob_decay`, `model.num_epochs_to_adjust_lr`)
 - 量子化互換の重みクリップ: 学習ステップごとに実施
 
 ### 2.3 データ使用
