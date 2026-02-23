@@ -6,6 +6,7 @@ import os
 import torch
 import torch.nn.functional as F
 import numpy as np
+from torch.utils.data import Sampler
 
 PACKED_SFEN_VALUE_BYTES = 40
 
@@ -75,10 +76,22 @@ class NNUEBinData(torch.utils.data.Dataset):
   def __len__(self):
     return self.len
 
-  def get_raw(self, idx):
+  def _ensure_open(self):
     if self.file is None:
       self.file = open(self.filename, 'r+b')
       self.bytes = mmap.mmap(self.file.fileno(), 0)
+
+  def get_ply_fast(self, idx):
+    """
+    Reads ply value directly from packed record without full board decode.
+    ply is stored as little-endian uint16 at offset +36.
+    """
+    self._ensure_open()
+    base = PACKED_SFEN_VALUE_BYTES * idx
+    return int.from_bytes(self.bytes[base + 36:base + 38], byteorder='little', signed=False)
+
+  def get_raw(self, idx):
+    self._ensure_open()
 
     base = PACKED_SFEN_VALUE_BYTES * idx
     br = BitReader(self.bytes, base)
@@ -133,3 +146,72 @@ class NNUEBinData(torch.utils.data.Dataset):
     state['file'] = None
     state.pop('bytes', None)
     return state
+
+
+class PlyBalancedSampler(Sampler):
+  """
+  Samples indices with replacement from ply buckets.
+  Keeps the number of samples equal to target_size.
+  """
+  def __init__(self, buckets, target_size, seed=42):
+    self.buckets = [bucket for bucket in buckets if bucket]
+    if not self.buckets:
+      raise ValueError('PlyBalancedSampler requires at least one non-empty bucket.')
+    self.target_size = int(target_size)
+    self.seed = int(seed)
+    self.epoch = 0
+
+  def __iter__(self):
+    rng = random.Random(self.seed + self.epoch)
+    for _ in range(self.target_size):
+      bucket = rng.choice(self.buckets)
+      yield rng.choice(bucket)
+
+  def __len__(self):
+    return self.target_size
+
+  def set_epoch(self, epoch):
+    self.epoch = int(epoch)
+
+
+def build_ply_buckets(dataset, num_bins=8, max_positions=0):
+  if num_bins <= 0:
+    raise ValueError(f'num_bins must be > 0 (got {num_bins})')
+  total = len(dataset)
+  if total == 0:
+    return []
+
+  if max_positions and max_positions > 0 and max_positions < total:
+    step = max(1, total // max_positions)
+    indices = list(range(0, total, step))
+    if len(indices) > max_positions:
+      indices = indices[:max_positions]
+  else:
+    indices = list(range(total))
+
+  plies = [dataset.get_ply_fast(i) for i in indices]
+  if not plies:
+    return []
+
+  min_ply = min(plies)
+  max_ply = max(plies)
+  if max_ply == min_ply:
+    return [indices]
+
+  span = max_ply - min_ply + 1
+  buckets = [[] for _ in range(num_bins)]
+  for idx, ply in zip(indices, plies):
+    bucket_index = min(num_bins - 1, (ply - min_ply) * num_bins // span)
+    buckets[bucket_index].append(idx)
+  return buckets
+
+
+def create_sampling_strategy(dataset, mode='uniform', num_bins=8, max_positions=0, seed=42):
+  mode = (mode or 'uniform').strip().lower()
+  target_size = len(dataset) if not max_positions or max_positions <= 0 else min(len(dataset), int(max_positions))
+  if mode == 'uniform':
+    return None
+  if mode == 'ply_balanced':
+    buckets = build_ply_buckets(dataset, num_bins=num_bins, max_positions=max_positions)
+    return PlyBalancedSampler(buckets, target_size=target_size, seed=seed)
+  raise ValueError(f'Unsupported sampling mode: {mode}. Use uniform or ply_balanced.')

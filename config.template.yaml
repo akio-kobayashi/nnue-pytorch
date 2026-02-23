@@ -34,6 +34,10 @@ data:
   py_data: false
   py_data_train_num_workers: 4
   py_data_val_batch_size: 32
+  py_data_sampling_mode: uniform
+  py_data_sampling_bins: 8
+  py_data_sampling_max_positions: 0
+  py_data_sampling_seed: 42
 
 trainer:
   accelerator: gpu

@@ -36,6 +36,10 @@ class NNUEDataModule(pl.LightningDataModule):
         py_data: bool = False,
         py_data_train_num_workers: int = DEFAULT_PY_DATA_TRAIN_NUM_WORKERS,
         py_data_val_batch_size: int = DEFAULT_PY_DATA_VAL_BATCH_SIZE,
+        py_data_sampling_mode: str = "uniform",
+        py_data_sampling_bins: int = 8,
+        py_data_sampling_max_positions: int = 0,
+        py_data_sampling_seed: int = 42,
         threads: int = -1,
     ) -> None:
         super().__init__()
@@ -92,10 +96,24 @@ class NNUEDataModule(pl.LightningDataModule):
 
     def train_dataloader(self) -> DataLoader:
         if self.hparams.py_data:
+            sampler = nnue_bin_dataset.create_sampling_strategy(
+                self.train_ds,
+                mode=self.hparams.py_data_sampling_mode,
+                num_bins=self.hparams.py_data_sampling_bins,
+                max_positions=self.hparams.py_data_sampling_max_positions,
+                seed=self.hparams.py_data_sampling_seed,
+            )
+            if sampler is not None:
+                print(
+                    "Using py_data sampler:",
+                    self.hparams.py_data_sampling_mode,
+                    f"(samples={len(sampler)})",
+                )
             return DataLoader(
                 self.train_ds,
                 batch_size=self.hparams.batch_size,
-                shuffle=True,
+                shuffle=(sampler is None),
+                sampler=sampler,
                 num_workers=self.hparams.py_data_train_num_workers,
             )
         return DataLoader(self.train_ds, batch_size=None, batch_sampler=None)
