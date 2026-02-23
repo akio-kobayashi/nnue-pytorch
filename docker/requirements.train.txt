@@ -1,8 +1,0 @@
-# CUDA 12.4 PyTorch wheels
---extra-index-url https://download.pytorch.org/whl/cu124
-
-torch
-pytorch-lightning
-python-chess==0.31.4
-matplotlib
-numpy

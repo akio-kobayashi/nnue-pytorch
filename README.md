@@ -113,10 +113,3 @@ This script runs in a loop, and will monitor the directory for new checkpoints. 
 * https://github.com/DanielUranga/TensorFlowNNUE
 * https://hxim.github.io/Stockfish-Evaluation-Guide/
 * dkappe - Suggesting ranger (https://github.com/lessw2020/Ranger-Deep-Learning-Optimizer)
-
-# Experiment Pipeline (AMD Zen2 + CUDA 12.4)
-
-For an end-to-end workflow (Docker PyTorch + training + export + YaneuraOu smoke test),
-see:
-
-- `docs/amd_zen2_cuda124_pipeline.md`

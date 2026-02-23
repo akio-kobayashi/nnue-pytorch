@@ -2,7 +2,3 @@ __pycache__/
 env/
 build/
 logs/
-.DS_Store
-.gitignore
-*.bak
-YaneuraOu/.DS_Store
