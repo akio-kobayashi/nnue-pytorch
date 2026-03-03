@@ -67,6 +67,27 @@
 - warmup は、学習初期の不安定な更新を抑える安全装置です。
 - 重みクリップは、最終的に `.nnue` へ量子化する前提で「表現可能な範囲」に学習を保つためです。
 
+### 2.2.1 バッチサイズと学習率の関係（重要）
+
+バッチサイズは GPU メモリに依存するため、環境ごとに変わります。  
+一般に、バッチサイズを変えるときは学習率も一緒にスケールします。
+
+線形スケーリング則（実験の出発点）:
+
+`lr_new = lr_base * (batch_size_new / batch_size_base)`
+
+例（`lr_base=1.0`, `batch_size_base=16384`）:
+
+1. `batch_size_new=8192` なら `lr_new=0.5`
+2. `batch_size_new=16384` なら `lr_new=1.0`
+3. `batch_size_new=32768` なら `lr_new=2.0`
+
+運用上の注意:
+
+1. バッチを大きくしたら `num_batches_warmup` も増やす
+2. いきなり大きく変えず、`0.5x / 1.0x / 2.0x` 比較で確認する
+3. 最終判断は `val_loss` だけでなく `.nnue` 対局結果で行う
+
 ### 2.3 データ使用
 
 - C++ローダー経路（高速）: `data.py_data: false`
@@ -308,11 +329,12 @@ data:
 狙い: まず安定して回し、比較基準を作る。
 
 1. Optimizer: `SGD + momentum + warmup`
-2. `batch_size`: 16384
+2. `batch_size`: 16384（基準バッチ）
 3. `smart_fen_skipping: true`
 4. `random_fen_skipping: 10`
 5. `ema_enabled: true`（`ema_decay: 0.9995`）
-6. 損失調整は既定値（`teacher_temperature=1.0`, `entropy_coef=1.0`, `outcome_pos_weight=1.0`）
+6. `lr`: 1.0（基準学習率）
+7. 損失調整は既定値（`teacher_temperature=1.0`, `entropy_coef=1.0`, `outcome_pos_weight=1.0`）
 
 ### 8.2 推奨プロファイルB（データが非常に大きい場合）
 
@@ -327,7 +349,8 @@ data:
 1. `batch_size=16384` は、公開NNUEトレーナー系で繰り返し使われる実務値です。
 2. `smart_fen_skipping + random_fen_skipping` は、局面の偏りとデータ量の両方を制御しやすい組み合わせです。  
    特に nodchip の shogi ブランチ README では `random-fen-skipping 10` が推奨例です。
-3. EMAは推論時の揺れを抑えるため、学習戦略の最初の拡張として入れやすいです。
+3. 学習率はバッチサイズと連動して調整する必要があります（線形スケーリング則）。
+4. EMAは推論時の揺れを抑えるため、学習戦略の最初の拡張として入れやすいです。
 
 ### 8.4 使うときの注意
 

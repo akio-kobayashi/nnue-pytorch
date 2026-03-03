@@ -8,12 +8,20 @@ RUNS_ROOT="${ROOT_DIR}/runs/strategy_sweep_${TIMESTAMP}"
 
 # Optional overrides (export before run):
 #   TRAIN_BIN=... VAL_BIN=... USE_GPU=1 L1_SIZE=1024 L2_SIZE=8 L3_SIZE=96
+#   BATCH_SIZE=16384 LR_BASE=1.0 LR_BASE_BATCH=16384
 TRAIN_BIN="${TRAIN_BIN:-../train.bin}"
 VAL_BIN="${VAL_BIN:-../train.bin}"
 USE_GPU="${USE_GPU:-1}"
 L1_SIZE="${L1_SIZE:-1024}"
 L2_SIZE="${L2_SIZE:-8}"
 L3_SIZE="${L3_SIZE:-96}"
+BATCH_SIZE="${BATCH_SIZE:-16384}"
+LR_BASE="${LR_BASE:-1.0}"
+LR_BASE_BATCH="${LR_BASE_BATCH:-16384}"
+
+# Linear scaling rule:
+#   lr_scaled = LR_BASE * (BATCH_SIZE / LR_BASE_BATCH)
+LR_SCALED="$(awk -v lr="${LR_BASE}" -v bs="${BATCH_SIZE}" -v b0="${LR_BASE_BATCH}" 'BEGIN { printf "%.8g", lr * (bs / b0) }')"
 
 # name | ema_enabled | ema_decay | teacher_temperature | entropy_coef | outcome_pos_weight | py_data | sampling_mode
 STRATEGIES=(
@@ -54,6 +62,8 @@ for row in "${STRATEGIES[@]}"; do
   sed \
     -e "s|^  train:.*$|  train: ${TRAIN_BIN}|g" \
     -e "s|^  val:.*$|  val: ${VAL_BIN}|g" \
+    -e "s|^  batch_size:.*$|  batch_size: ${BATCH_SIZE}|g" \
+    -e "s|^  lr:.*$|  lr: [${LR_SCALED}]|g" \
     -e "s|^  ema_enabled:.*$|  ema_enabled: $( [[ \"${ema_enabled}\" == \"1\" ]] && echo true || echo false )|g" \
     -e "s|^  ema_decay:.*$|  ema_decay: ${ema_decay}|g" \
     -e "s|^  teacher_temperature:.*$|  teacher_temperature: ${teacher_temp}|g" \
@@ -72,6 +82,7 @@ for row in "${STRATEGIES[@]}"; do
     mv "${config_path}.tmp" "${config_path}"
   fi
 
+  echo "run=${run_name} batch_size=${BATCH_SIZE} lr=${LR_SCALED}"
   echo "===== start: ${run_name} ====="
   python "${ROOT_DIR}/train.py" --config "${config_path}" \
     2>&1 | tee "${run_dir}/train.log"
