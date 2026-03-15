@@ -43,6 +43,9 @@ The default is:
 python train.py ... --features="HalfKP^"
 ```
 
+Currently the training data loader also supports `HalfKPE9` and `HalfKPE9^`.
+Note that the Python-side visualizer remains HalfKP-oriented.
+
 ## Skipping certain fens in the training
 
 `--smart-fen-skipping` currently skips over moves where the king is in check, or where the bestMove is a capture (typical of non-quiet positions).

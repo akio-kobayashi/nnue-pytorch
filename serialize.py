@@ -80,6 +80,8 @@ class NNUEWriter():
 
     if model.feature_set.name.startswith("HalfKP"):
       feature_name = "HalfKP(Friend)"
+    elif model.feature_set.name.startswith("HalfKPE9"):
+      feature_name = "HalfKPE9(Friend)"
     else:
       feature_name = model.feature_set.name
     description = f"Features={feature_name}[{num_features}->{l1_size}x2],".encode('ascii')
