@@ -6,13 +6,14 @@
 - Optimizer: SGD + momentum + warmup (`model.num_batches_warmup`)
 - Optional stabilization: EMA (`model.ema_*`)
 - Optional loss tuning: `model.teacher_temperature`, `model.entropy_coef`, `model.outcome_pos_weight`
+- Optional CORN-style auxiliary loss: `model.corn_aux_weight`, `model.corn_aux_thresholds`
 - Optional sampling extension (`py_data=true`): `data.py_data_sampling_mode` (`uniform` / `ply_balanced`)
 
 # Setup
 ```
-python3 -m venv env
+uv venv
 source env/bin/activate
-pip install python-chess==0.31.4 pytorch-lightning torch matplotlib
+uv pip install python-chess==0.31.4 pytorch-lightning torch matplotlib
 ```
 
 # Build the fast DataLoader
@@ -90,6 +91,58 @@ Why:
 - `shogi_ai` may already apply SFEN-level sampling before writing `.bin`
 - `shogi_ai` currently writes `.bin` files with `move=0`, so `nnue-pytorch`'s capture-based skip heuristic is not a reliable replacement for upstream filtering
 
+## CORN auxiliary thresholds
+
+`model.corn_aux_thresholds` can be used to add a cumulative ordinal auxiliary loss on top of the main value loss.
+The helper command should usually derive thresholds from the actual training-input distribution, preferably from the final PackedSfenValue `.bin` files that `train.py` will read.
+The command computes quantiles in cp space and then converts them into the softened teacher-logit space used by `model.py`:
+`score / (score_scaling * teacher_temperature)`.
+That keeps the ordinal bins from collapsing into heavily imbalanced classes while matching the loss scale.
+
+```bash
+python corn_thresholds.py --input-bin /path/to/train.bin --num-thresholds 7 --weight 0.1
+```
+
+When using `shogi_ai`, prefer building thresholds from the same frequency-corrected distribution that `generate` will use:
+
+```bash
+python shogi_ai/wsl2/src/create_dataset.py corn-thresholds \
+  --input-csv eval_sfen.csv \
+  --sfen-count-csv sfen_counts.csv \
+  --sfen-sampling-mode sqrt \
+  --sfen-sampling-min-freq 2 \
+  --num-thresholds 7 \
+  --score-scaling 361 \
+  --teacher-temperature 1.0 \
+  --corn-aux-weight 0.1
+```
+
+That command mirrors `generate`'s SFEN-frequency correction and prints both cp thresholds and the corresponding `--model.corn_aux_thresholds=[...]` values for `nnue-pytorch`.
+
+To update `config.yaml` directly:
+
+```bash
+python corn_thresholds.py --config config.yaml --input-bin /path/to/train.bin --num-thresholds 7 --weight 0.1
+```
+
+Multiple inputs are supported, so you can use split outputs before or after `generate`:
+
+```bash
+python corn_thresholds.py --input-bin train_part1.bin train_part2.bin --num-thresholds 7
+python corn_thresholds.py --input-csv eval_part1.csv eval_part2.csv --num-thresholds 7
+```
+
+Explicit thresholds are also supported:
+
+```bash
+python corn_thresholds.py --thresholds -400 -200 0 200 400 --weight 0.1
+```
+
+Explicit `--thresholds` are interpreted in cp space and converted to logit thresholds before being written to config.
+
+If `--input-bin` and `--input-csv` are omitted, the command falls back to uniform thresholds from `--min-score` to `--max-score`.
+That fallback is mainly for quick experiments; distribution-based thresholds are the recommended mode.
+
 
 
 # Export a network
@@ -129,7 +182,7 @@ python visualize.py nn.nnue  --features="HalfKP" --ref-model nn.cpkt --ref-featu
 # Logging
 
 ```
-pip install tensorboard
+uv pip install tensorboard
 tensorboard --logdir=logs
 ```
 Then, go to http://localhost:6006/

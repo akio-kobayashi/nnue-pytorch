@@ -17,6 +17,8 @@ model:
   teacher_temperature: 1.0
   entropy_coef: 1.0
   outcome_pos_weight: 1.0
+  corn_aux_weight: 0.0
+  corn_aux_thresholds: []
   ply_begin_threshold: 100.0
   ply_end_threshold: 120.0
 

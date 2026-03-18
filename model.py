@@ -28,7 +28,8 @@ class NNUE(pl.LightningModule):
       momentum: float = 0.0, ply_begin_threshold: float = 100.0, ply_end_threshold: float = 120.0,
       l1_size: int = 1024, l2_size: int = 8, l3_size: int = 96,
       ema_enabled: bool = False, ema_decay: float = 0.9995, ema_update_every: int = 1, ema_start_step: int = 1000,
-      teacher_temperature: float = 1.0, entropy_coef: float = 1.0, outcome_pos_weight: float = 1.0):
+      teacher_temperature: float = 1.0, entropy_coef: float = 1.0, outcome_pos_weight: float = 1.0,
+      corn_aux_weight: float = 0.0, corn_aux_thresholds: list[float] | None = None):
     super().__init__()
     if lambda_ is None:
       lambda_ = [1.0]
@@ -67,6 +68,10 @@ class NNUE(pl.LightningModule):
     self.teacher_temperature = max(float(teacher_temperature), self.EPSILON)
     self.entropy_coef = float(entropy_coef)
     self.outcome_pos_weight = max(float(outcome_pos_weight), self.EPSILON)
+    self.corn_aux_weight = max(float(corn_aux_weight), 0.0)
+    if corn_aux_thresholds is None:
+      corn_aux_thresholds = []
+    self.corn_aux_thresholds = sorted(float(v) for v in corn_aux_thresholds)
 
     self._zero_virtual_feature_weights()
 
@@ -159,6 +164,22 @@ class NNUE(pl.LightningModule):
     )
     return teacher_entropy, outcome_entropy, teacher_loss, outcome_loss
 
+  def _compute_corn_aux_loss(self, q: Tensor, score: Tensor) -> Tensor:
+    """
+    A cumulative ordinal auxiliary loss with fixed logit thresholds.
+
+    Thresholds live in the same teacher-logit space as the softened teacher:
+    score / (score_scaling * teacher_temperature).
+    """
+    if self.corn_aux_weight <= 0.0 or not self.corn_aux_thresholds:
+      return torch.zeros_like(q)
+
+    thresholds = q.new_tensor(self.corn_aux_thresholds).view(1, -1)
+    logits = (q / self.teacher_temperature).unsqueeze(-1) - thresholds
+    score_logits = score.unsqueeze(-1) / (self.score_scaling * self.teacher_temperature)
+    targets = (score_logits >= thresholds).to(logits.dtype)
+    return F.binary_cross_entropy_with_logits(logits, targets, reduction='none').mean(dim=-1)
+
   def step_(self, batch: Batch, batch_idx: int, loss_type: str) -> Tensor:
     us, them, white, black, outcome, score, ply = batch
     # 600 is the kPonanzaConstant scaling factor needed to convert the training net output to a score.
@@ -168,8 +189,11 @@ class NNUE(pl.LightningModule):
     lambda_ = self._compute_lambda(ply)
     result = lambda_ * teacher_loss + (1.0 - lambda_) * outcome_loss
     entropy = lambda_ * teacher_entropy + (1.0 - lambda_) * outcome_entropy
-    loss = result.mean() - self.entropy_coef * entropy.mean()
+    corn_aux_loss = self._compute_corn_aux_loss(q, score)
+    loss = result.mean() - self.entropy_coef * entropy.mean() + self.corn_aux_weight * corn_aux_loss.mean()
     self.log(loss_type, loss)
+    if self.corn_aux_weight > 0.0 and self.corn_aux_thresholds:
+      self.log(f"{loss_type}_corn_aux", corn_aux_loss.mean())
     return loss
 
   def _iter_ema_parameters(self) -> Iterator[tuple[str, Tensor]]:
