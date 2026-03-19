@@ -138,7 +138,7 @@ def main():
         MyCLI(
             M.NNUE,
             NNUEDataModule,
-            parser_kwargs={"default_config_files": ["config.yaml"]},
+            parser_kwargs={"fit": {"default_config_files": ["config.yaml"]}},
             **cli_kwargs,
         )
     except TypeError as exc:
