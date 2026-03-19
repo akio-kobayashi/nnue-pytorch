@@ -2,7 +2,6 @@ model:
   l1_size: __L1_SIZE__
   l2_size: __L2_SIZE__
   l3_size: __L3_SIZE__
-  num_buckets: 8
   lambda_: [1.0]
   lr: [1.0]
   label_smoothing_eps: 0.0

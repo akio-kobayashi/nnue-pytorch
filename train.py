@@ -133,7 +133,18 @@ def main():
     # It will also handle seeding and checkpointing.
     # All model/data/trainer arguments are now passed through the command line
     # with dot notation, e.g., --model.lambda_ 0.5 or --data.batch_size 8192
-    MyCLI(M.NNUE, NNUEDataModule, save_config_callback=None, default_config_files=["config.yaml"])
+    cli_kwargs = {"save_config_callback": None}
+    try:
+        MyCLI(
+            M.NNUE,
+            NNUEDataModule,
+            parser_kwargs={"default_config_files": ["config.yaml"]},
+            **cli_kwargs,
+        )
+    except TypeError as exc:
+        if "default_config_files" not in str(exc):
+            raise
+        MyCLI(M.NNUE, NNUEDataModule, **cli_kwargs)
 
 if __name__ == "__main__":
     main()

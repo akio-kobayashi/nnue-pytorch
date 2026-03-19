@@ -2,7 +2,6 @@ model:
   l1_size: 1024
   l2_size: 8
   l3_size: 96
-  num_buckets: 8
   lambda_: [1.0]
   lr: [1.0]
   label_smoothing_eps: 0.0
