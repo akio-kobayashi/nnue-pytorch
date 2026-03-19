@@ -11,23 +11,181 @@
 - Optional sampling extension (`py_data=true`): `data.py_data_sampling_mode` (`uniform` / `ply_balanced`)
 
 # Setup
+
+## Ubuntu / WSL prerequisites
+
+The fast data loader is a C++/CMake build, so a Python virtual environment alone is not enough.
+Install the toolchain first:
+
+```bash
+sudo apt update
+sudo apt install -y \
+  build-essential \
+  cmake \
+  ninja-build \
+  pkg-config \
+  git \
+  python3-dev
 ```
-uv venv
-source env/bin/activate
-uv pip install python-chess==0.31.4 pytorch-lightning torch matplotlib
+
+If `uv` is not installed yet:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
+
+Open a new shell afterwards, or ensure `uv` is on `PATH`.
+
+## Python environment with `uv`
+
+PyTorch wheels differ between CPU / CUDA / ROCm, so keep separate virtual environments for each target.
+Do not reuse one environment across backends.
+
+### CPU environment
+
+```bash
+uv venv .venv-cpu
+source .venv-cpu/bin/activate
+uv pip install torch torchvision torchaudio
+uv pip install -r requirements.txt
+```
+
+### CUDA environment
+
+As of March 19, 2026, the PyTorch selector at `https://pytorch.org/get-started/locally/` shows CUDA-specific pip indexes such as `cu118`, `cu126`, and `cu128`.
+Pick the one matching your installed NVIDIA driver / CUDA runtime.
+
+Example for CUDA 12.8:
+
+```bash
+uv venv .venv-cu128
+source .venv-cu128/bin/activate
+uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+uv pip install -r requirements.txt
+```
+
+### ROCm environment
+
+ROCm wheels are Linux-only. Install ROCm on the host first, then create a dedicated environment.
+
+Example for ROCm 6.3:
+
+```bash
+uv venv .venv-rocm63
+source .venv-rocm63/bin/activate
+uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm6.3
+uv pip install -r requirements.txt
+```
+
+If you need a different backend or newer command, treat the official PyTorch install selector as the source of truth:
+https://pytorch.org/get-started/locally/
+
+## About `cshogi`
+
+`nnue-pytorch` itself does not require `cshogi` for the normal training path.
+The common Python dependencies in `requirements.txt` therefore do not include it.
+
+If you use `shogi_ai/wsl2/src/create_dataset.py` or other upstream data-generation scripts that depend on `cshogi`, install the required fork separately in that environment.
+In this repository, treat `cshogi` as a data-pipeline dependency, not a base `nnue-pytorch` dependency.
+
+## Container-based setup
+
+### Docker
+
+If you do not want to install build tools on the host, you can work inside a container and bind-mount this repository.
+
+CPU example:
+
+```bash
+docker run --rm -it \
+  -v "$PWD":/workspace \
+  -w /workspace \
+  ubuntu:24.04 bash
+```
+
+Inside the container:
+
+```bash
+apt update
+apt install -y build-essential cmake ninja-build pkg-config git curl python3 python3-dev
+curl -LsSf https://astral.sh/uv/install.sh | sh
+. "$HOME/.local/bin/env"
+uv venv .venv-cpu
+source .venv-cpu/bin/activate
+uv pip install torch torchvision torchaudio
+uv pip install -r requirements.txt
+sh compile_data_loader.sh
+```
+
+CUDA example:
+
+```bash
+docker run --rm -it \
+  --gpus all \
+  -v "$PWD":/workspace \
+  -w /workspace \
+  ubuntu:24.04 bash
+```
+
+Inside the container, use the same setup but install the CUDA wheel matching your target backend, for example:
+
+```bash
+uv venv .venv-cu128
+source .venv-cu128/bin/activate
+uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+uv pip install -r requirements.txt
+sh compile_data_loader.sh
+```
+
+For CUDA containers, the host must already have NVIDIA drivers and `nvidia-container-toolkit` configured.
+
+### Apptainer
+
+Apptainer is often easier on shared servers because it does not require Docker daemon access.
+
+Interactive shell from Ubuntu:
+
+```bash
+apptainer shell --fakeroot docker://ubuntu:24.04
+```
+
+Or with the repository bound in:
+
+```bash
+apptainer shell \
+  --bind "$PWD":/workspace \
+  --pwd /workspace \
+  docker://ubuntu:24.04
+```
+
+Inside the container, install the same apt and `uv` dependencies as above, then build in the bound repository.
+
+GPU notes:
+
+- CUDA: use `apptainer shell --nv ...`
+- ROCm: use `apptainer shell --rocm ...`
+
+Example:
+
+```bash
+apptainer shell --nv --bind "$PWD":/workspace --pwd /workspace docker://ubuntu:24.04
+```
+
+If you build a persistent Apptainer image, keep separate images or virtual environments for CPU / CUDA / ROCm for the same reason as bare-metal installs: PyTorch wheels are backend-specific.
 
 # Build the fast DataLoader
-This requires a C++17 compiler.
+
+Activate the same virtual environment you plan to train with, then build the extension:
+
+Linux / macOS / WSL:
+```bash
+source .venv-cpu/bin/activate
+sh compile_data_loader.sh
+```
 
 Windows:
-```
-compile_data_loader.bat
-```
-
-Linux/Mac:
-```
-sh compile_data_loader.bat
+```bash
+bash compile_data_loader.sh
 ```
 
 # Train a network

@@ -1,0 +1,5 @@
+numpy
+python-chess==0.31.4
+pytorch-lightning
+matplotlib
+PyYAML
