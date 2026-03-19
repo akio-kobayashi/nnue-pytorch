@@ -51,6 +51,7 @@ uv pip install -r requirements.txt
 ```
 
 `requirements.txt` includes `jsonargparse[signatures]`, which is required by `pytorch-lightning`'s `LightningCLI`.
+It also includes `tensorboard`, because the default config uses `TensorBoardLogger`.
 
 ### CUDA environment
 
@@ -368,7 +369,6 @@ python visualize.py nn.nnue  --features="HalfKP" --ref-model nn.cpkt --ref-featu
 # Logging
 
 ```
-uv pip install tensorboard
 tensorboard --logdir=logs
 ```
 Then, go to http://localhost:6006/
