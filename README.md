@@ -50,6 +50,8 @@ uv pip install torch torchvision torchaudio
 uv pip install -r requirements.txt
 ```
 
+`requirements.txt` includes `jsonargparse[signatures]`, which is required by `pytorch-lightning`'s `LightningCLI`.
+
 ### CUDA environment
 
 As of March 19, 2026, the PyTorch selector at `https://pytorch.org/get-started/locally/` shows CUDA-specific pip indexes such as `cu118`, `cu126`, and `cu128`.

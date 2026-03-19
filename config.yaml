@@ -6,7 +6,6 @@ model:
   lr: [1.0]
   label_smoothing_eps: 0.0
   num_batches_warmup: 10000
-  gamma: 0.992
   score_scaling: 361
   momentum: 0.0
   ema_enabled: false
