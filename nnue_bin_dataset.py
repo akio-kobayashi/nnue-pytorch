@@ -12,6 +12,24 @@ PACKED_SFEN_VALUE_BYTES = 40
 
 HUFFMAN_MAP = {0b000 : chess.PAWN, 0b001 : chess.KNIGHT, 0b010 : chess.BISHOP, 0b011 : chess.ROOK, 0b100: chess.QUEEN}
 
+
+def _piece_type_constant(*names):
+  for name in names:
+    value = getattr(chess, name, None)
+    if isinstance(value, int):
+      return value
+  return None
+
+
+MAJOR_PIECE_TYPES = tuple(
+  value for value in (
+    _piece_type_constant('ROOK'),
+    _piece_type_constant('BISHOP'),
+    _piece_type_constant('DRAGON', 'PROM_ROOK'),
+    _piece_type_constant('HORSE', 'PROM_BISHOP'),
+  ) if value is not None
+)
+
 def twos(v, w):
   return v - int((v << 1) & 2**w)
 
@@ -49,21 +67,75 @@ class ToTensor(object):
     self.features = feature_set
 
   def __call__(self, sample):
-    bd, _, outcome, score = sample
+    bd, _, outcome, score, ply = sample
     us = torch.tensor([bd.turn])
     them = torch.tensor([not bd.turn])
     outcome = torch.tensor([outcome])
     score = torch.tensor([score])
+    ply = torch.tensor([ply])
+    aux = build_auxiliary_targets(bd)
     white, black = self.features.get_active_features(bd)
-    return us.float(), them.float(), white.float(), black.float(), outcome.float(), score.float()
+    return us.float(), them.float(), white.float(), black.float(), outcome.float(), score.float(), ply.float(), aux.float()
 
 class RandomFlip(object):
   def __call__(self, sample):
-    bd, move, outcome, score = sample
+    bd, move, outcome, score, ply = sample
     mirror = random.choice([False, True])
     if mirror:
       bd = bd.mirror()
-    return bd, move, outcome, score
+    return bd, move, outcome, score, ply
+
+
+def _attackers(board, color, sq):
+  if not hasattr(board, 'attackers'):
+    raise RuntimeError('py_data auxiliary labels require board.attackers().')
+  return board.attackers(color, sq)
+
+
+def _king_zone_squares(board, color):
+  king_sq = board.king(color)
+  if king_sq is None:
+    return []
+  if not hasattr(board, 'attacks'):
+    raise RuntimeError('py_data auxiliary labels require board.attacks().')
+  zone = {king_sq}
+  zone.update(board.attacks(king_sq))
+  return list(zone)
+
+
+def _has_major_attack_into_zone(board, attacker_color, zone_squares):
+  for sq in zone_squares:
+    for attacker_sq in _attackers(board, attacker_color, sq):
+      piece = board.piece_at(attacker_sq)
+      if piece is not None and piece.piece_type in MAJOR_PIECE_TYPES:
+        return 1.0
+  return 0.0
+
+
+def _has_hanging_major(board, color):
+  for sq, piece in board.piece_map().items():
+    if piece.color != color or piece.piece_type not in MAJOR_PIECE_TYPES:
+      continue
+    attacked = any(True for _ in _attackers(board, not color, sq))
+    if not attacked:
+      continue
+    defended = any(True for _ in _attackers(board, color, sq))
+    if not defended:
+      return 1.0
+  return 0.0
+
+
+def build_auxiliary_targets(board):
+  us = board.turn
+  them = not us
+  them_king_zone = _king_zone_squares(board, them)
+  us_king_zone = _king_zone_squares(board, us)
+  return torch.tensor([
+    _has_major_attack_into_zone(board, us, them_king_zone),
+    _has_major_attack_into_zone(board, them, us_king_zone),
+    _has_hanging_major(board, us),
+    _has_hanging_major(board, them),
+  ])
 
 class NNUEBinData(torch.utils.data.Dataset):
   def __init__(self, filename, feature_set):
@@ -134,7 +206,7 @@ class NNUEBinData(torch.utils.data.Dataset):
     # 1, 0, -1
     game_result = br.readBits(8)
     outcome = {1: 1.0, 0: 0.5, 255: 0.0}[game_result]
-    return bd, move, outcome, score
+    return bd, move, outcome, score, ply
 
   def __getitem__(self, idx):
     item = self.get_raw(idx)

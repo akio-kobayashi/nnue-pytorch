@@ -19,6 +19,8 @@ model:
   outcome_pos_weight: 1.0
   corn_aux_weight: 0.0
   corn_aux_thresholds: []
+  king_zone_aux_weight: 0.0
+  major_safety_aux_weight: 0.0
   ply_begin_threshold: 100.0
   ply_end_threshold: 120.0
 

@@ -7,6 +7,7 @@
 - Optional stabilization: EMA (`model.ema_*`)
 - Optional loss tuning: `model.teacher_temperature`, `model.entropy_coef`, `model.outcome_pos_weight`
 - Optional CORN-style auxiliary loss: `model.corn_aux_weight`, `model.corn_aux_thresholds`
+- Optional structural auxiliary losses (`py_data=true`): `model.king_zone_aux_weight`, `model.major_safety_aux_weight`
 - Optional sampling extension (`py_data=true`): `data.py_data_sampling_mode` (`uniform` / `ply_balanced`)
 
 # Setup
@@ -142,6 +143,31 @@ Explicit `--thresholds` are interpreted in cp space and converted to logit thres
 
 If `--input-bin` and `--input-csv` are omitted, the command falls back to uniform thresholds from `--min-score` to `--max-score`.
 That fallback is mainly for quick experiments; distribution-based thresholds are the recommended mode.
+
+## Structural auxiliary losses
+
+Two training-only auxiliary heads are available when `data.py_data=true`:
+
+- `model.king_zone_aux_weight`
+  - predicts whether side-to-move major pieces (`ROOK/BISHOP` and promoted aliases when available) attack the opponent king zone, and vice versa
+- `model.major_safety_aux_weight`
+  - predicts whether either side has a hanging major piece (attacked and not defended)
+
+These labels are derived from the decoded board in `nnue_bin_dataset.py`, so they are currently unavailable on the fast C++ loader path.
+Use them only as small regularizers, for example:
+
+```bash
+python train.py \
+  --data.py_data=true \
+  --model.king_zone_aux_weight=0.02 \
+  --model.major_safety_aux_weight=0.01
+```
+
+Recommended usage:
+
+- keep both weights small
+- enable one at a time before combining them
+- compare against a `py_data=true` baseline, since the loader path changes
 
 
 

@@ -29,7 +29,8 @@ class NNUE(pl.LightningModule):
       l1_size: int = 1024, l2_size: int = 8, l3_size: int = 96,
       ema_enabled: bool = False, ema_decay: float = 0.9995, ema_update_every: int = 1, ema_start_step: int = 1000,
       teacher_temperature: float = 1.0, entropy_coef: float = 1.0, outcome_pos_weight: float = 1.0,
-      corn_aux_weight: float = 0.0, corn_aux_thresholds: list[float] | None = None):
+      corn_aux_weight: float = 0.0, corn_aux_thresholds: list[float] | None = None,
+      king_zone_aux_weight: float = 0.0, major_safety_aux_weight: float = 0.0):
     super().__init__()
     if lambda_ is None:
       lambda_ = [1.0]
@@ -48,6 +49,8 @@ class NNUE(pl.LightningModule):
     self.l1 = nn.Linear(2 * l1_size, l2_size)
     self.l2 = nn.Linear(l2_size, l3_size)
     self.output = nn.Linear(l3_size, 1)
+    self.king_zone_head = nn.Linear(l3_size, 2)
+    self.major_safety_head = nn.Linear(l3_size, 2)
     self.lambda_ = lambda_
     self.lr = lr
     self.label_smoothing_eps = label_smoothing_eps
@@ -72,6 +75,8 @@ class NNUE(pl.LightningModule):
     if corn_aux_thresholds is None:
       corn_aux_thresholds = []
     self.corn_aux_thresholds = sorted(float(v) for v in corn_aux_thresholds)
+    self.king_zone_aux_weight = max(float(king_zone_aux_weight), 0.0)
+    self.major_safety_aux_weight = max(float(major_safety_aux_weight), 0.0)
 
     self._zero_virtual_feature_weights()
 
@@ -129,7 +134,7 @@ class NNUE(pl.LightningModule):
     else:
       raise Exception('Cannot change feature set from {} to {}.'.format(self.feature_set.name, new_feature_set.name))
 
-  def forward(self, us: Tensor, them: Tensor, w_in: Tensor, b_in: Tensor) -> Tensor:
+  def _forward_hidden(self, us: Tensor, them: Tensor, w_in: Tensor, b_in: Tensor) -> Tensor:
     w = self.input(w_in)
     b = self.input(b_in)
     l0_ = (us * torch.cat([w, b], dim=1)) + (them * torch.cat([b, w], dim=1))
@@ -137,8 +142,10 @@ class NNUE(pl.LightningModule):
     l0_ = torch.clamp(l0_, 0.0, 1.0)
     l1_ = torch.clamp(self.l1(l0_), 0.0, 1.0)
     l2_ = torch.clamp(self.l2(l1_), 0.0, 1.0)
-    x = self.output(l2_)
-    return x
+    return l2_
+
+  def forward(self, us: Tensor, them: Tensor, w_in: Tensor, b_in: Tensor) -> Tensor:
+    return self.output(self._forward_hidden(us, them, w_in, b_in))
 
   def _compute_lambda(self, ply: Tensor) -> Tensor | float:
     lambda_base = self.lambda_[0]
@@ -180,20 +187,68 @@ class NNUE(pl.LightningModule):
     targets = (score_logits >= thresholds).to(logits.dtype)
     return F.binary_cross_entropy_with_logits(logits, targets, reduction='none').mean(dim=-1)
 
+  def _compute_structural_aux_losses(self, hidden: Tensor, aux_targets: Tensor | None) -> tuple[Tensor, Tensor]:
+    zero = hidden.new_zeros(hidden.shape[0])
+    if aux_targets is None:
+      return zero, zero
+
+    king_zone_loss = zero
+    major_safety_loss = zero
+
+    if self.king_zone_aux_weight > 0.0:
+      logits = self.king_zone_head(hidden)
+      king_zone_loss = F.binary_cross_entropy_with_logits(
+          logits,
+          aux_targets[:, 0:2],
+          reduction='none',
+      ).mean(dim=-1)
+
+    if self.major_safety_aux_weight > 0.0:
+      logits = self.major_safety_head(hidden)
+      major_safety_loss = F.binary_cross_entropy_with_logits(
+          logits,
+          aux_targets[:, 2:4],
+          reduction='none',
+      ).mean(dim=-1)
+
+    return king_zone_loss, major_safety_loss
+
+  def _unpack_batch(self, batch: Batch) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor | None]:
+    if len(batch) == 7:
+      us, them, white, black, outcome, score, ply = batch
+      aux_targets = None
+    elif len(batch) == 8:
+      us, them, white, black, outcome, score, ply, aux_targets = batch
+    else:
+      raise ValueError(f"Unexpected batch size: {len(batch)}")
+    return us, them, white, black, outcome, score, ply, aux_targets
+
   def step_(self, batch: Batch, batch_idx: int, loss_type: str) -> Tensor:
-    us, them, white, black, outcome, score, ply = batch
+    us, them, white, black, outcome, score, ply, aux_targets = self._unpack_batch(batch)
     # 600 is the kPonanzaConstant scaling factor needed to convert the training net output to a score.
     # This needs to match the value used in the serializer
-    q = self(us, them, white, black) * self.NNUE_TO_SCORE / self.score_scaling
+    hidden = self._forward_hidden(us, them, white, black)
+    q = self.output(hidden) * self.NNUE_TO_SCORE / self.score_scaling
     teacher_entropy, outcome_entropy, teacher_loss, outcome_loss = self._compute_loss_terms(q, outcome, score)
     lambda_ = self._compute_lambda(ply)
     result = lambda_ * teacher_loss + (1.0 - lambda_) * outcome_loss
     entropy = lambda_ * teacher_entropy + (1.0 - lambda_) * outcome_entropy
     corn_aux_loss = self._compute_corn_aux_loss(q, score)
-    loss = result.mean() - self.entropy_coef * entropy.mean() + self.corn_aux_weight * corn_aux_loss.mean()
+    king_zone_aux_loss, major_safety_aux_loss = self._compute_structural_aux_losses(hidden, aux_targets)
+    loss = (
+        result.mean()
+        - self.entropy_coef * entropy.mean()
+        + self.corn_aux_weight * corn_aux_loss.mean()
+        + self.king_zone_aux_weight * king_zone_aux_loss.mean()
+        + self.major_safety_aux_weight * major_safety_aux_loss.mean()
+    )
     self.log(loss_type, loss)
     if self.corn_aux_weight > 0.0 and self.corn_aux_thresholds:
       self.log(f"{loss_type}_corn_aux", corn_aux_loss.mean())
+    if self.king_zone_aux_weight > 0.0 and aux_targets is not None:
+      self.log(f"{loss_type}_king_zone_aux", king_zone_aux_loss.mean())
+    if self.major_safety_aux_weight > 0.0 and aux_targets is not None:
+      self.log(f"{loss_type}_major_safety_aux", major_safety_aux_loss.mean())
     return loss
 
   def _iter_ema_parameters(self) -> Iterator[tuple[str, Tensor]]:
