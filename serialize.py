@@ -29,6 +29,23 @@ ACTIVATION_SCALE = 127.0
 OUTPUT_BIAS_SCALE = 9600.0  # kPonanzaConstant * FV_SCALE = 600 * 16 = 9600
 
 
+def _infer_features_from_input_dim(input_dim: int) -> str:
+  for feature_name in features.get_available_feature_blocks_names():
+    feature_set = features.get_feature_set_from_name(feature_name)
+    if feature_set.num_features == input_dim:
+      return feature_name
+  raise ValueError(f"Could not infer feature set from input dimension {input_dim}")
+
+
+def _infer_model_args_from_state_dict(state_dict):
+  return {
+      "features": _infer_features_from_input_dim(state_dict["input.weight"].shape[1]),
+      "l1_size": int(state_dict["input.weight"].shape[0]),
+      "l2_size": int(state_dict["l1.weight"].shape[0]),
+      "l3_size": int(state_dict["l2.weight"].shape[0]),
+  }
+
+
 def _canonical_feature_name(feature_set_name: str) -> str:
   if feature_set_name.startswith("HalfKP"):
     return "HalfKP(Friend)"
@@ -290,12 +307,13 @@ def main():
   default_l2_size = 8
   default_l3_size = 96
 
-  def resolve_model_args(hparams=None):
+  def resolve_model_args(hparams=None, inferred=None):
     hparams = hparams or {}
-    resolved_features = args.features if args.features is not None else hparams.get("features", default_features)
-    resolved_l1_size = args.l1_size if args.l1_size is not None else hparams.get("l1_size", default_l1_size)
-    resolved_l2_size = args.l2_size if args.l2_size is not None else hparams.get("l2_size", default_l2_size)
-    resolved_l3_size = args.l3_size if args.l3_size is not None else hparams.get("l3_size", default_l3_size)
+    inferred = inferred or {}
+    resolved_features = args.features if args.features is not None else hparams.get("features", inferred.get("features", default_features))
+    resolved_l1_size = args.l1_size if args.l1_size is not None else hparams.get("l1_size", inferred.get("l1_size", default_l1_size))
+    resolved_l2_size = args.l2_size if args.l2_size is not None else hparams.get("l2_size", inferred.get("l2_size", default_l2_size))
+    resolved_l3_size = args.l3_size if args.l3_size is not None else hparams.get("l3_size", inferred.get("l3_size", default_l3_size))
     return resolved_features, resolved_l1_size, resolved_l2_size, resolved_l3_size
 
   print('Converting %s to %s' % (args.source, args.target))
@@ -308,14 +326,15 @@ def main():
     else:
       checkpoint = torch.load(args.source, map_location="cpu")
       hyper_parameters = checkpoint.get("hyper_parameters", {})
-      resolved_features, resolved_l1_size, resolved_l2_size, resolved_l3_size = resolve_model_args(hyper_parameters)
-      nnue = M.NNUE.load_from_checkpoint(
-          args.source,
+      inferred_args = _infer_model_args_from_state_dict(checkpoint["state_dict"])
+      resolved_features, resolved_l1_size, resolved_l2_size, resolved_l3_size = resolve_model_args(hyper_parameters, inferred_args)
+      nnue = M.NNUE(
           features=resolved_features,
           l1_size=resolved_l1_size,
           l2_size=resolved_l2_size,
           l3_size=resolved_l3_size,
       )
+      nnue.load_state_dict(checkpoint["state_dict"])
     if args.use_ema and hasattr(nnue, "apply_ema_weights"):
       if not nnue.apply_ema_weights():
         raise RuntimeError("Requested --use_ema but no EMA weights were found in the source model/checkpoint.")
