@@ -278,13 +278,25 @@ def main():
   parser.add_argument("source", help="Source file (can be .ckpt, .pt or .bin)")
   parser.add_argument("target", help="Target file (can be .pt or .bin)")
   features.add_argparse_args(parser)
-  parser.add_argument("--l1_size", type=int, default=1024)
-  parser.add_argument("--l2_size", type=int, default=8)
-  parser.add_argument("--l3_size", type=int, default=96)
+  parser.set_defaults(features=None)
+  parser.add_argument("--l1_size", type=int, default=None)
+  parser.add_argument("--l2_size", type=int, default=None)
+  parser.add_argument("--l3_size", type=int, default=None)
   parser.add_argument("--use_ema", action="store_true", help="Use EMA weights when exporting from .pt/.ckpt")
   args = parser.parse_args()
 
-  feature_set = features.get_feature_set_from_name(args.features)
+  default_features = "HalfKP^"
+  default_l1_size = 1024
+  default_l2_size = 8
+  default_l3_size = 96
+
+  def resolve_model_args(hparams=None):
+    hparams = hparams or {}
+    resolved_features = args.features if args.features is not None else hparams.get("features", default_features)
+    resolved_l1_size = args.l1_size if args.l1_size is not None else hparams.get("l1_size", default_l1_size)
+    resolved_l2_size = args.l2_size if args.l2_size is not None else hparams.get("l2_size", default_l2_size)
+    resolved_l3_size = args.l3_size if args.l3_size is not None else hparams.get("l3_size", default_l3_size)
+    return resolved_features, resolved_l1_size, resolved_l2_size, resolved_l3_size
 
   print('Converting %s to %s' % (args.source, args.target))
 
@@ -294,7 +306,16 @@ def main():
     if args.source.endswith(".pt"):
       nnue = torch.load(args.source)
     else:
-      nnue = M.NNUE.load_from_checkpoint(args.source, features=args.features, l1_size=args.l1_size, l2_size=args.l2_size, l3_size=args.l3_size)
+      checkpoint = torch.load(args.source, map_location="cpu")
+      hyper_parameters = checkpoint.get("hyper_parameters", {})
+      resolved_features, resolved_l1_size, resolved_l2_size, resolved_l3_size = resolve_model_args(hyper_parameters)
+      nnue = M.NNUE.load_from_checkpoint(
+          args.source,
+          features=resolved_features,
+          l1_size=resolved_l1_size,
+          l2_size=resolved_l2_size,
+          l3_size=resolved_l3_size,
+      )
     if args.use_ema and hasattr(nnue, "apply_ema_weights"):
       if not nnue.apply_ema_weights():
         raise RuntimeError("Requested --use_ema but no EMA weights were found in the source model/checkpoint.")
@@ -306,8 +327,16 @@ def main():
   elif args.source.endswith(".bin"):
     if not args.target.endswith(".pt"):
       raise Exception("Target file must end with .pt")
+    resolved_features, resolved_l1_size, resolved_l2_size, resolved_l3_size = resolve_model_args()
+    feature_set = features.get_feature_set_from_name(resolved_features)
     with open(args.source, 'rb') as f:
-      reader = NNUEReader(f, feature_set, l1_size=args.l1_size, l2_size=args.l2_size, l3_size=args.l3_size)
+      reader = NNUEReader(
+          f,
+          feature_set,
+          l1_size=resolved_l1_size,
+          l2_size=resolved_l2_size,
+          l3_size=resolved_l3_size,
+      )
     torch.save(reader.model, args.target)
   else:
     raise Exception('Invalid filetypes: ' + str(args))
