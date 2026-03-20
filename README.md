@@ -256,7 +256,15 @@ Why:
 ## CORN auxiliary thresholds
 
 `model.corn_aux_thresholds` can be used to add a cumulative ordinal auxiliary loss on top of the main value loss.
-The helper command should usually derive thresholds from the actual training-input distribution, preferably from the final PackedSfenValue `.bin` files that `train.py` will read.
+There are two ways to build thresholds:
+
+- `shogi_ai/wsl2/src/create_dataset.py corn-thresholds`
+  - preferred when you use `shogi_ai` as the data pipeline
+  - mirrors `generate`'s SFEN-frequency correction and should be treated as the source of truth
+- `nnue-pytorch/corn_thresholds.py`
+  - convenient when you already have final `.bin` files or want a local fallback inside this repository
+
+`nnue-pytorch/corn_thresholds.py` derives thresholds from the actual training-input distribution, preferably from the final PackedSfenValue `.bin` files that `train.py` will read.
 The command computes quantiles in cp space and then converts them into the softened teacher-logit space used by `model.py`:
 `score / (score_scaling * teacher_temperature)`.
 That keeps the ordinal bins from collapsing into heavily imbalanced classes while matching the loss scale.
@@ -265,7 +273,7 @@ That keeps the ordinal bins from collapsing into heavily imbalanced classes whil
 python corn_thresholds.py --input-bin /path/to/train.bin --num-thresholds 7 --weight 0.1
 ```
 
-When using `shogi_ai`, prefer building thresholds from the same frequency-corrected distribution that `generate` will use:
+When using `shogi_ai`, prefer building thresholds there from the same frequency-corrected distribution that `generate` will use:
 
 ```bash
 python shogi_ai/wsl2/src/create_dataset.py corn-thresholds \
@@ -280,6 +288,7 @@ python shogi_ai/wsl2/src/create_dataset.py corn-thresholds \
 ```
 
 That command mirrors `generate`'s SFEN-frequency correction and prints both cp thresholds and the corresponding `--model.corn_aux_thresholds=[...]` values for `nnue-pytorch`.
+If you use `shogi_ai`, this is the recommended path.
 
 To update `config.yaml` directly:
 
@@ -329,6 +338,33 @@ Recommended usage:
 - keep both weights small
 - enable one at a time before combining them
 - compare against a `py_data=true` baseline, since the loader path changes
+
+## Reusable training script
+
+If you do not want to repeat the `CORN` and training options manually, use:
+
+```bash
+scripts/train_with_corn.sh
+```
+
+Useful overrides:
+
+```bash
+RUN_NAME=vanilla_halfkp \
+TRAIN_BIN=/path/train.bin \
+VAL_BIN=/path/val.bin \
+FEATURES=HalfKP \
+ENABLE_CORN=1 \
+CORN_NUM_THRESHOLDS=7 \
+CORN_WEIGHT=0.1 \
+scripts/train_with_corn.sh
+```
+
+The script generates a run-local config from `config.template.yaml`, optionally updates `model.corn_aux_*` via `corn_thresholds.py`, and then launches:
+
+```bash
+python train.py fit --config <generated_config>
+```
 
 
 
