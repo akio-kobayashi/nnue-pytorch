@@ -393,7 +393,7 @@ def load_model(filename, feature_set):
             model = M.NNUE.load_from_checkpoint(
                 filename, feature_set=feature_set)
         model.eval()
-    elif filename.endswith(".nnue"):
+    elif filename.endswith(".bin"):
         with open(filename, 'rb') as f:
             reader = NNUEReader(f, feature_set)
         model = reader.model
@@ -405,12 +405,12 @@ def load_model(filename, feature_set):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Visualizes networks in ckpt, pt and nnue format.")
+        description="Visualizes networks in ckpt, pt and bin format.")
     parser.add_argument(
-        "model", help="Source model (can be .ckpt, .pt or .nnue)")
+        "model", help="Source model (can be .ckpt, .pt or .bin)")
     parser.add_argument(
         "--ref-model", type=str, required=False,
-        help="Visualize the difference between the given reference model (can be .ckpt, .pt or .nnue).")
+        help="Visualize the difference between the given reference model (can be .ckpt, .pt or .bin).")
     parser.add_argument(
         "--ref-features", type=str, required=False,
         help="The reference feature set to use (default = same as source model).")

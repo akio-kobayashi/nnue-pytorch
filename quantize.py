@@ -83,7 +83,7 @@ def main():
   print('Quantized MSE:', compute_mse(nnue_int8, train))
 
   writer = NNUEQuantizedWriter(nnue_int8)
-  with open('quantized.nnue', 'wb') as f:
+  with open('quantized.bin', 'wb') as f:
     f.write(writer.buf)
 
   #torch.jit.save(torch.jit.script(nnue_int8), 'quantized.pt')

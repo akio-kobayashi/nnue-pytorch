@@ -60,7 +60,7 @@ def dict_to_xy(d):
     return x, y
 
 def parse_ordo_file(filename, label):
-    p = re.compile('.*nn-epoch(\\d*)\\.nnue')
+    p = re.compile(r'.*nn-epoch(\d*)\.bin')
     with open(filename, 'r') as ordo_file:
         rows = []
         lines = ordo_file.readlines()

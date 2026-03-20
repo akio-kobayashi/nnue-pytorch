@@ -25,7 +25,7 @@ def compute_mse(nnue, data):
 
 def main():
   parser = argparse.ArgumentParser(description="Runs evaluation for a model.")
-  parser.add_argument("model", help="Source file (can be .ckpt, .pt or .nnue)")
+  parser.add_argument("model", help="Source file (can be .ckpt, .pt or .bin)")
   parser.add_argument("--dataset", default="d8_128000_21865.binpack", help="Dataset to evaluate on (.bin)")
   args = parser.parse_args()
 

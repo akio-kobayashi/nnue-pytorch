@@ -29,7 +29,7 @@ def find_ckpt_files(root_dir):
     return ckpt_files
 
 def find_nnue_files(root_dir):
-    p = re.compile('.*\\.nnue')
+    p = re.compile(r'.*\.bin')
     nnue_files = []
     for path, subdirs, files in os.walk(root_dir, followlinks=False):
         for filename in files:
@@ -69,7 +69,7 @@ def get_nets_by_directory(best_nets, worst_nets, num_best_to_keep=16):
     return binned_best_nets, binned_worst_nets
 
 def delete_bad_nets(root_dir, num_best_to_keep=16):
-    net_epoch_p = re.compile(".*epoch([0-9]*)\\.nnue")
+    net_epoch_p = re.compile(r".*epoch([0-9]*)\.bin")
     ckpt_epoch_p = re.compile(".*epoch=([0-9]*).*\\.ckpt")
     ordo_filename = os.path.join(root_dir, "ordo.out")
     if not os.path.exists(ordo_filename):
@@ -117,26 +117,26 @@ def show_help():
     print('If the ordo.out is not found nothing is deleted.')
     print('It uses the ratings from the ordo file to determine which nets are best.')
     print('The engine names must contain the network name in the')
-    print('following format: "nn-epoch[0-9]*\\.nnue". The network file')
+    print('following format: "nn-epoch[0-9]*\\.bin". The network file')
     print('can be specified with a parent directory (for example')
-    print('"run_0/nn-epoch100.nnue"), in which case the .ckpt file corresponding')
-    print('to this .nnue file will only be searched for in the parent ("run_0") directory.')
+    print('"run_0/nn-epoch100.bin"), in which case the .ckpt file corresponding')
+    print('to this .bin file will only be searched for in the parent ("run_0") directory.')
     print('The .ckpt files must contain "epoch=([0-9]*).*\\.ckpt".')
-    print('Both ckpt and nnue files are deleted. Only nets listed in the ordo')
+    print('Both ckpt and bin files are deleted. Only nets listed in the ordo')
     print('file can be deleted. Other nets are always kept.')
-    print('The .nnue and .ckpt files are matched by epoch.')
+    print('The .bin and .ckpt files are matched by epoch.')
     print('')
     print('The directory layout can be for example:')
     print('- root_dir')
     print('  - run_0')
     print('    - a/b/c/d.ckpt')
-    print('    - *.nnue')
+    print('    - *.bin')
     print('  - run_1')
     print('    - a/b/c/d.ckpt')
-    print('    - *.nnue')
+    print('    - *.bin')
     print('  - ordo.out')
     print('    (in this case ony lines with engine name matching')
-    print('     "run_[01]/nn-epoch[0-9]*\\.nnue" will be used.)')
+    print('     "run_[01]/nn-epoch[0-9]*\\.bin" will be used.)')
 
 def main():
     if len(sys.argv) < 2:

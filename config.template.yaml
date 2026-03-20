@@ -44,6 +44,7 @@ data:
 trainer:
   accelerator: gpu
   devices: 1
+  max_epochs: 300
   default_root_dir: __RUN_DIR__
   logger:
     class_path: pytorch_lightning.loggers.TensorBoardLogger

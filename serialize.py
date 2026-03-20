@@ -274,9 +274,9 @@ class NNUEReader():
     return v
 
 def main():
-  parser = argparse.ArgumentParser(description="Converts files between ckpt and nnue format.")
-  parser.add_argument("source", help="Source file (can be .ckpt, .pt or .nnue)")
-  parser.add_argument("target", help="Target file (can be .pt or .nnue)")
+  parser = argparse.ArgumentParser(description="Converts files between ckpt and YaneuraOu NN binary format.")
+  parser.add_argument("source", help="Source file (can be .ckpt, .pt or .bin)")
+  parser.add_argument("target", help="Target file (can be .pt or .bin)")
   features.add_argparse_args(parser)
   parser.add_argument("--l1_size", type=int, default=1024)
   parser.add_argument("--l2_size", type=int, default=8)
@@ -289,8 +289,8 @@ def main():
   print('Converting %s to %s' % (args.source, args.target))
 
   if args.source.endswith(".pt") or args.source.endswith(".ckpt"):
-    if not args.target.endswith(".nnue"):
-      raise Exception("Target file must end with .nnue")
+    if not args.target.endswith(".bin"):
+      raise Exception("Target file must end with .bin")
     if args.source.endswith(".pt"):
       nnue = torch.load(args.source)
     else:
@@ -303,7 +303,7 @@ def main():
     writer = NNUEWriter(nnue, os.path.dirname(args.target))
     with open(args.target, 'wb') as f:
       f.write(writer.buf)
-  elif args.source.endswith(".nnue"):
+  elif args.source.endswith(".bin"):
     if not args.target.endswith(".pt"):
       raise Exception("Target file must end with .pt")
     with open(args.source, 'rb') as f:

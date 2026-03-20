@@ -371,35 +371,35 @@ python train.py fit --config <generated_config>
 # Export a network
 
 Using either a checkpoint (`.ckpt`) or serialized model (`.pt`),
-you can export to SF NNUE format.  This will convert `last.ckpt`
-to `nn.nnue`, which you can load directly in SF.
+you can export to the YaneuraOu NN binary format. This will convert `last.ckpt`
+to `nn.bin`.
 ```
-python serialize.py last.ckpt nn.nnue
+python serialize.py last.ckpt nn.bin
 ```
 To export EMA weights:
 ```
-python serialize.py --use_ema last.ckpt nn.nnue
+python serialize.py --use_ema last.ckpt nn.bin
 ```
 
 # Import a network
 
-Import an existing SF NNUE network to the pytorch network format.
+Import an existing YaneuraOu NN binary to the pytorch network format.
 ```
-python serialize.py nn.nnue converted.pt
+python serialize.py nn.bin converted.pt
 ```
 
 # Visualize a network
 
 Visualize a network from either a checkpoint (`.ckpt`), a serialized model (`.pt`)
-or a SF NNUE file (`.nnue`).
+or a YaneuraOu NN binary (`.bin`).
 ```
-python visualize.py nn.nnue --features="HalfKP"
+python visualize.py nn.bin --features="HalfKP"
 ```
 
 Visualize the difference between two networks from either a checkpoint (`.ckpt`), a serialized model (`.pt`)
-or a SF NNUE file (`.nnue`).
+or a YaneuraOu NN binary (`.bin`).
 ```
-python visualize.py nn.nnue  --features="HalfKP" --ref-model nn.cpkt --ref-features="HalfKP^"
+python visualize.py nn.bin  --features="HalfKP" --ref-model nn.cpkt --ref-features="HalfKP^"
 ```
 
 # Logging
@@ -415,7 +415,7 @@ Then, go to http://localhost:6006/
 python run_games.py --concurrency 16 --stockfish_exe ./stockfish.master --c_chess_exe ./c-chess-cli --ordo_exe ./ordo --book_file_name ./noob_3moves.epd run96
 ```
 
-Automatically converts all `.ckpt` found under `run96` to `.nnue` and runs games to find the best net. Games are played using `c-chess-cli` and nets are ranked using `ordo`.
+Automatically converts all `.ckpt` found under `run96` to `.bin` and runs games to find the best net. Games are played using `c-chess-cli` and nets are ranked using `ordo`.
 This script runs in a loop, and will monitor the directory for new checkpoints. Can be run in parallel with the training, if idle cores are available.
 
 

@@ -66,7 +66,7 @@ def eval_engine_batch(engine_path, net_path, fens):
 
 def main():
     parser = argparse.ArgumentParser(description="")
-    parser.add_argument("--net", type=str, help="path to a .nnue net")
+    parser.add_argument("--net", type=str, help="path to a .bin net")
     parser.add_argument("--engine", type=str, help="path to stockfish")
     parser.add_argument("--data", type=str, help="path to .bin dataset")
     parser.add_argument("--checkpoint", type=str, help="Optional checkpoint (used instead of nnue for local eval)")
