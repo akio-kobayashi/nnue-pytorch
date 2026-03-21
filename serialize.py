@@ -46,6 +46,13 @@ def _infer_model_args_from_state_dict(state_dict):
   }
 
 
+def _load_checkpoint_extras(model, checkpoint):
+  # Lightning stores EMA weights outside state_dict, so restore them explicitly
+  # when loading a raw .ckpt for export.
+  if hasattr(model, "on_load_checkpoint"):
+    model.on_load_checkpoint(checkpoint)
+
+
 def _canonical_feature_name(feature_set_name: str) -> str:
   if feature_set_name.startswith("HalfKP"):
     return "HalfKP(Friend)"
@@ -335,6 +342,7 @@ def main():
           l3_size=resolved_l3_size,
       )
       nnue.load_state_dict(checkpoint["state_dict"])
+      _load_checkpoint_extras(nnue, checkpoint)
     if args.use_ema and hasattr(nnue, "apply_ema_weights"):
       if not nnue.apply_ema_weights():
         raise RuntimeError("Requested --use_ema but no EMA weights were found in the source model/checkpoint.")
