@@ -161,7 +161,7 @@ struct HalfKPx4 {
     static constexpr int K_INPUTS = HalfKP::NUM_SQ;
     static constexpr int PIECE_INPUTS = HalfKP::NUM_PLANES;
     static constexpr int SQ_INPUTS = HalfKP::NUM_SQ;
-    static constexpr int PIECE_TYPE_COLOR_INPUTS = (HalfKP::NUM_PLANES - 1) / HalfKP::NUM_SQ + 1;
+    static constexpr int PIECE_TYPE_COLOR_INPUTS = (HalfKP::NUM_PLANES - 1 + HalfKP::NUM_SQ - 1) / HalfKP::NUM_SQ + 1;
     static constexpr int INPUTS = HalfKP::INPUTS + K_INPUTS + PIECE_INPUTS + SQ_INPUTS + PIECE_TYPE_COLOR_INPUTS;
 
     static constexpr int MAX_K_FEATURES = 1;

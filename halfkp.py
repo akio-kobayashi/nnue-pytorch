@@ -7,7 +7,7 @@ from feature_block import *
 NUM_SQ = 81
 # NUM_PT = 10
 NUM_PLANES = 1548
-NUM_PIECE_TYPES = (NUM_PLANES - 1) // NUM_SQ
+NUM_PIECE_TYPES = (NUM_PLANES - 1 + NUM_SQ - 1) // NUM_SQ
 NUM_PTC = NUM_PIECE_TYPES + 1
 
 def orient(is_white_pov: bool, sq: int):
