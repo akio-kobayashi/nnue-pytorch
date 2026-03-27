@@ -47,19 +47,20 @@ class FeatureBlock:
     that are active for this board.
     '''
 
-    def __init__(self, name, hash, factors):
+    def __init__(self, name, hash, factors, main_factor_name=None):
         if not isinstance(factors, OrderedDict):
             raise Exception('Factors must be an collections.OrderedDict')
 
         self.name = name
         self.hash = hash
         self.factors = factors
-        self.num_real_features = factors[_get_main_factor_name(name)]
+        self.main_factor_name = main_factor_name or _get_main_factor_name(name)
+        self.num_real_features = factors[self.main_factor_name]
         self.num_features = sum(v for n, v in factors.items())
         self.num_virtual_features = self.num_features - self.num_real_features
 
     def get_main_factor_name(self):
-        return _get_main_factor_name(self.name)
+        return self.main_factor_name
 
     '''
     This method represents the default factorizer. If your feature block

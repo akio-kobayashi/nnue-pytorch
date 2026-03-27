@@ -7,6 +7,8 @@ from feature_block import *
 NUM_SQ = 81
 # NUM_PT = 10
 NUM_PLANES = 1548
+NUM_PIECE_TYPES = (NUM_PLANES - 1) // NUM_SQ
+NUM_PTC = NUM_PIECE_TYPES + 1
 
 def orient(is_white_pov: bool, sq: int):
   return (63 * (not is_white_pov)) ^ sq
@@ -14,6 +16,10 @@ def orient(is_white_pov: bool, sq: int):
 def halfkp_idx(is_white_pov: bool, king_sq: int, sq: int, p: chess.Piece):
   p_idx = (p.piece_type - 1) * 2 + (p.color != is_white_pov)
   return 1 + orient(is_white_pov, sq) + p_idx * NUM_SQ + king_sq * NUM_PLANES
+
+
+def halfkp_piece_type_color_idx(is_white_pov: bool, p: chess.Piece):
+  return (p.piece_type - 1) * 2 + (p.color != is_white_pov) + 1
 
 class Features(FeatureBlock):
   def __init__(self):
@@ -60,8 +66,79 @@ class FactorizedFeatures(FeatureBlock):
 
     return [idx, self.get_factor_base_feature('HalfK') + k_idx, self.get_factor_base_feature('P') + p_idx]
 
+
+class MultiFactorizedFeatures(FeatureBlock):
+  def __init__(self):
+    super(MultiFactorizedFeatures, self).__init__(
+        'HalfKPx4',
+        0x5d69d5b8,
+        OrderedDict([
+            ('HalfKP', NUM_PLANES * NUM_SQ),
+            ('HalfK', NUM_SQ),
+            ('P', NUM_PLANES),
+            ('SQ', NUM_SQ),
+            ('PTC', NUM_PTC),
+        ]),
+        main_factor_name='HalfKP')
+    self.base = Features()
+
+  @staticmethod
+  def _plane_to_sq_ptc(plane_idx):
+    if plane_idx <= 0:
+      return 0, 0
+
+    plane_offset = plane_idx - 1
+    sq_idx = plane_offset % NUM_SQ
+    ptc_idx = plane_offset // NUM_SQ + 1
+    return sq_idx, ptc_idx
+
+  def get_active_features(self, board: chess.Board):
+    white, black = self.base.get_active_features(board)
+    halfk_base = self.get_factor_base_feature('HalfK')
+    p_base = self.get_factor_base_feature('P')
+    sq_base = self.get_factor_base_feature('SQ')
+    ptc_base = self.get_factor_base_feature('PTC')
+
+    def piece_features(base, color):
+      indices = torch.zeros(self.num_features)
+      indices[:self.num_real_features] = base
+
+      piece_count = 0
+      for sq, p in board.piece_map().items():
+        if p.piece_type == chess.KING:
+          continue
+
+        piece_count += 1
+        sq_idx = orient(color, sq)
+        ptc_idx = halfkp_piece_type_color_idx(color, p)
+        plane_idx = 1 + sq_idx + (ptc_idx - 1) * NUM_SQ
+        indices[p_base + plane_idx] = 1.0
+        indices[sq_base + sq_idx] = 1.0
+        indices[ptc_base + ptc_idx] = 1.0
+
+      indices[halfk_base + orient(color, board.king(color))] = piece_count
+      return indices
+
+    return (piece_features(white, chess.WHITE), piece_features(black, chess.BLACK))
+
+  def get_feature_factors(self, idx):
+    if idx >= self.num_real_features:
+      raise Exception('Feature must be real')
+
+    k_idx = idx // NUM_PLANES
+    plane_idx = idx % NUM_PLANES
+    sq_idx, ptc_idx = self._plane_to_sq_ptc(plane_idx)
+
+    return [
+        idx,
+        self.get_factor_base_feature('HalfK') + k_idx,
+        self.get_factor_base_feature('P') + plane_idx,
+        self.get_factor_base_feature('SQ') + sq_idx,
+        self.get_factor_base_feature('PTC') + ptc_idx,
+    ]
+
 '''
 This is used by the features module for discovery of feature blocks.
 '''
 def get_feature_block_clss():
-  return [Features, FactorizedFeatures]
+  return [Features, FactorizedFeatures, MultiFactorizedFeatures]
