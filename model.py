@@ -30,7 +30,12 @@ class NNUE(pl.LightningModule):
       ema_enabled: bool = False, ema_decay: float = 0.9995, ema_update_every: int = 1, ema_start_step: int = 1000,
       teacher_temperature: float = 1.0, entropy_coef: float = 1.0, outcome_pos_weight: float = 1.0,
       corn_aux_weight: float = 0.0, corn_aux_thresholds: list[float] | None = None,
-      king_zone_aux_weight: float = 0.0, major_safety_aux_weight: float = 0.0):
+      king_zone_aux_weight: float = 0.0, major_safety_aux_weight: float = 0.0,
+      accumulator_mean_min: float = 0.0, accumulator_mean_max: float = 1.0,
+      accumulator_mean_band_weight: float = 0.0,
+      accumulator_upper_saturation_target: float = 0.0, accumulator_upper_saturation_weight: float = 0.0,
+      accumulator_lower_saturation_target: float = 0.0, accumulator_lower_saturation_weight: float = 0.0,
+      embedding_norm_target: float = 0.0, embedding_norm_weight: float = 0.0):
     super().__init__()
     if lambda_ is None:
       lambda_ = [1.0]
@@ -77,6 +82,15 @@ class NNUE(pl.LightningModule):
     self.corn_aux_thresholds = sorted(float(v) for v in corn_aux_thresholds)
     self.king_zone_aux_weight = max(float(king_zone_aux_weight), 0.0)
     self.major_safety_aux_weight = max(float(major_safety_aux_weight), 0.0)
+    self.accumulator_mean_min = float(accumulator_mean_min)
+    self.accumulator_mean_max = float(accumulator_mean_max)
+    self.accumulator_mean_band_weight = max(float(accumulator_mean_band_weight), 0.0)
+    self.accumulator_upper_saturation_target = max(float(accumulator_upper_saturation_target), 0.0)
+    self.accumulator_upper_saturation_weight = max(float(accumulator_upper_saturation_weight), 0.0)
+    self.accumulator_lower_saturation_target = max(float(accumulator_lower_saturation_target), 0.0)
+    self.accumulator_lower_saturation_weight = max(float(accumulator_lower_saturation_weight), 0.0)
+    self.embedding_norm_target = max(float(embedding_norm_target), 0.0)
+    self.embedding_norm_weight = max(float(embedding_norm_weight), 0.0)
 
     self._zero_virtual_feature_weights()
 
@@ -135,17 +149,59 @@ class NNUE(pl.LightningModule):
       raise Exception('Cannot change feature set from {} to {}.'.format(self.feature_set.name, new_feature_set.name))
 
   def _forward_hidden(self, us: Tensor, them: Tensor, w_in: Tensor, b_in: Tensor) -> Tensor:
+    return self._forward_hidden_with_accumulator(us, them, w_in, b_in)[0]
+
+  def _forward_hidden_with_accumulator(self, us: Tensor, them: Tensor, w_in: Tensor, b_in: Tensor) -> tuple[Tensor, Tensor]:
     w = self.input(w_in)
     b = self.input(b_in)
-    l0_ = (us * torch.cat([w, b], dim=1)) + (them * torch.cat([b, w], dim=1))
+    l0_pre = (us * torch.cat([w, b], dim=1)) + (them * torch.cat([b, w], dim=1))
     # clamp here is used as a clipped relu to (0.0, 1.0)
-    l0_ = torch.clamp(l0_, 0.0, 1.0)
+    l0_ = torch.clamp(l0_pre, 0.0, 1.0)
     l1_ = torch.clamp(self.l1(l0_), 0.0, 1.0)
     l2_ = torch.clamp(self.l2(l1_), 0.0, 1.0)
-    return l2_
+    return l2_, l0_pre
 
   def forward(self, us: Tensor, them: Tensor, w_in: Tensor, b_in: Tensor) -> Tensor:
     return self.output(self._forward_hidden(us, them, w_in, b_in))
+
+  def _compute_accumulator_regularization(self, accumulator_pre: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    zero = accumulator_pre.new_zeros(())
+    mean_band_loss = zero
+    upper_saturation_loss = zero
+    lower_saturation_loss = zero
+
+    accumulator_mean = accumulator_pre.mean(dim=0)
+    upper_saturation = (accumulator_pre >= 1.0).to(accumulator_pre.dtype).mean(dim=0)
+    lower_saturation = (accumulator_pre <= 0.0).to(accumulator_pre.dtype).mean(dim=0)
+
+    if self.accumulator_mean_band_weight > 0.0:
+      mean_band_loss = (
+          torch.square(torch.clamp(self.accumulator_mean_min - accumulator_mean, min=0.0))
+          + torch.square(torch.clamp(accumulator_mean - self.accumulator_mean_max, min=0.0))
+      ).mean()
+
+    if self.accumulator_upper_saturation_weight > 0.0:
+      upper_saturation_loss = torch.square(
+          torch.clamp(upper_saturation - self.accumulator_upper_saturation_target, min=0.0)
+      ).mean()
+
+    if self.accumulator_lower_saturation_weight > 0.0:
+      lower_saturation_loss = torch.square(
+          torch.clamp(lower_saturation - self.accumulator_lower_saturation_target, min=0.0)
+      ).mean()
+
+    stats = torch.stack([
+        accumulator_mean.mean(),
+        upper_saturation.mean(),
+        lower_saturation.mean(),
+    ])
+    return mean_band_loss, upper_saturation_loss, lower_saturation_loss, stats
+
+  def _compute_embedding_norm_regularization(self) -> Tensor:
+    if self.embedding_norm_weight <= 0.0 or self.embedding_norm_target <= 0.0:
+      return self.input.weight.new_zeros(())
+    embedding_norms = torch.linalg.vector_norm(self.input.weight, dim=0)
+    return torch.square(embedding_norms - self.embedding_norm_target).mean()
 
   def _compute_lambda(self, ply: Tensor) -> Tensor | float:
     lambda_base = self.lambda_[0]
@@ -227,7 +283,7 @@ class NNUE(pl.LightningModule):
     us, them, white, black, outcome, score, ply, aux_targets = self._unpack_batch(batch)
     # 600 is the kPonanzaConstant scaling factor needed to convert the training net output to a score.
     # This needs to match the value used in the serializer
-    hidden = self._forward_hidden(us, them, white, black)
+    hidden, accumulator_pre = self._forward_hidden_with_accumulator(us, them, white, black)
     q = self.output(hidden) * self.NNUE_TO_SCORE / self.score_scaling
     teacher_entropy, outcome_entropy, teacher_loss, outcome_loss = self._compute_loss_terms(q, outcome, score)
     lambda_ = self._compute_lambda(ply)
@@ -235,12 +291,20 @@ class NNUE(pl.LightningModule):
     entropy = lambda_ * teacher_entropy + (1.0 - lambda_) * outcome_entropy
     corn_aux_loss = self._compute_corn_aux_loss(q, score)
     king_zone_aux_loss, major_safety_aux_loss = self._compute_structural_aux_losses(hidden, aux_targets)
+    accumulator_mean_band_loss, accumulator_upper_saturation_loss, accumulator_lower_saturation_loss, accumulator_stats = (
+        self._compute_accumulator_regularization(accumulator_pre)
+    )
+    embedding_norm_loss = self._compute_embedding_norm_regularization()
     loss = (
         result.mean()
         - self.entropy_coef * entropy.mean()
         + self.corn_aux_weight * corn_aux_loss.mean()
         + self.king_zone_aux_weight * king_zone_aux_loss.mean()
         + self.major_safety_aux_weight * major_safety_aux_loss.mean()
+        + self.accumulator_mean_band_weight * accumulator_mean_band_loss
+        + self.accumulator_upper_saturation_weight * accumulator_upper_saturation_loss
+        + self.accumulator_lower_saturation_weight * accumulator_lower_saturation_loss
+        + self.embedding_norm_weight * embedding_norm_loss
     )
     self.log(loss_type, loss)
     if self.corn_aux_weight > 0.0 and self.corn_aux_thresholds:
@@ -249,6 +313,17 @@ class NNUE(pl.LightningModule):
       self.log(f"{loss_type}_king_zone_aux", king_zone_aux_loss.mean())
     if self.major_safety_aux_weight > 0.0 and aux_targets is not None:
       self.log(f"{loss_type}_major_safety_aux", major_safety_aux_loss.mean())
+    if self.accumulator_mean_band_weight > 0.0:
+      self.log(f"{loss_type}_acc_mean_band", accumulator_mean_band_loss)
+    if self.accumulator_upper_saturation_weight > 0.0:
+      self.log(f"{loss_type}_acc_upper_sat", accumulator_upper_saturation_loss)
+    if self.accumulator_lower_saturation_weight > 0.0:
+      self.log(f"{loss_type}_acc_lower_sat", accumulator_lower_saturation_loss)
+    if self.embedding_norm_weight > 0.0:
+      self.log(f"{loss_type}_emb_norm", embedding_norm_loss)
+    self.log(f"{loss_type}_acc_mean", accumulator_stats[0])
+    self.log(f"{loss_type}_acc_upper_sat_rate", accumulator_stats[1])
+    self.log(f"{loss_type}_acc_lower_sat_rate", accumulator_stats[2])
     return loss
 
   def _iter_ema_parameters(self) -> Iterator[tuple[str, Tensor]]:
