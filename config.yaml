@@ -19,6 +19,15 @@ model:
   corn_aux_thresholds: []
   king_zone_aux_weight: 0.0
   major_safety_aux_weight: 0.0
+  accumulator_mean_min: 0.0
+  accumulator_mean_max: 1.0
+  accumulator_mean_band_weight: 0.0
+  accumulator_upper_saturation_target: 0.0
+  accumulator_upper_saturation_weight: 0.0
+  accumulator_lower_saturation_target: 0.0
+  accumulator_lower_saturation_weight: 0.0
+  embedding_norm_target: 0.0
+  embedding_norm_weight: 0.0
   ply_begin_threshold: 100.0
   ply_end_threshold: 120.0
 
