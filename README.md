@@ -366,6 +366,22 @@ The script generates a run-local config from `config.template.yaml`, optionally 
 python train.py fit --config <generated_config>
 ```
 
+## Split a packed sfen file into train/val binaries
+
+If you have a single packed sfen dataset and want separate `train.bin` and
+`val.bin` files, use:
+
+```bash
+python scripts/split_packedsfen.py /path/to/data.bin \
+  --train-output /path/to/train.bin \
+  --val-output /path/to/val.bin \
+  --val-ratio 0.01 \
+  --seed 0
+```
+
+The splitter keeps records aligned to the 40-byte packed sfen format and writes
+exactly the requested validation ratio (rounded to the nearest record count).
+
 
 
 # Export a network
