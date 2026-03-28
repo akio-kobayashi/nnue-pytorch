@@ -262,6 +262,118 @@ struct HalfKPx4 {
     }
 };
 
+template <bool IncludeSQ, bool IncludePTC>
+struct HalfKPFactorizedExtended {
+    static constexpr int K_INPUTS = HalfKP::NUM_SQ;
+    static constexpr int PIECE_INPUTS = HalfKP::NUM_PLANES;
+    static constexpr int SQ_INPUTS = IncludeSQ ? HalfKP::NUM_SQ : 0;
+    static constexpr int PIECE_TYPE_COLOR_INPUTS =
+        IncludePTC ? (HalfKP::NUM_PLANES - 1 + HalfKP::NUM_SQ - 1) / HalfKP::NUM_SQ + 1 : 0;
+    static constexpr int INPUTS = HalfKP::INPUTS + K_INPUTS + PIECE_INPUTS + SQ_INPUTS + PIECE_TYPE_COLOR_INPUTS;
+
+    static constexpr int MAX_K_FEATURES = 1;
+    static constexpr int MAX_PIECE_FEATURES = 38;
+    static constexpr int MAX_SQ_FEATURES = IncludeSQ ? 38 : 0;
+    static constexpr int MAX_PIECE_TYPE_COLOR_FEATURES = IncludePTC ? 38 : 0;
+    static constexpr int MAX_ACTIVE_FEATURES =
+        HalfKP::MAX_ACTIVE_FEATURES + MAX_K_FEATURES + MAX_PIECE_FEATURES
+        + MAX_SQ_FEATURES + MAX_PIECE_TYPE_COLOR_FEATURES;
+
+    static int piece_sq_index(Eval::BonaPiece p) {
+        return (static_cast<int>(p) - 1) % HalfKP::NUM_SQ;
+    }
+
+    static int piece_type_color_index(Eval::BonaPiece p) {
+        return (static_cast<int>(p) - 1) / HalfKP::NUM_SQ + 1;
+    }
+
+    static void fill_features_sparse(int i, const TrainingDataEntry& e, int* features, float* values, int& counter, Color color)
+    {
+        auto counter_before = counter;
+        int offset = HalfKP::fill_features_sparse(i, e, features, values, counter, color);
+
+        auto& pos = *e.pos;
+        Eval::BonaPiece* pieces = nullptr;
+        if (color == Color::BLACK) {
+            pieces = pos.eval_list()->piece_list_fb();
+        }
+        else {
+            pieces = pos.eval_list()->piece_list_fw();
+        }
+
+        {
+            auto num_added_features = counter - counter_before;
+            PieceNumber target = static_cast<PieceNumber>(PIECE_NUMBER_KING + color);
+            auto sq_target_k = static_cast<Square>((pieces[target] - Eval::BonaPiece::f_king) % SQ_NB);
+            int idx = counter * 2;
+            features[idx] = i;
+            features[idx + 1] = offset + static_cast<int>(sq_target_k);
+            values[counter] = static_cast<float>(num_added_features);
+            counter += 1;
+        }
+        offset += K_INPUTS;
+
+        {
+            int features_unordered[38];
+            for (PieceNumber i = PIECE_NUMBER_ZERO; i < PIECE_NUMBER_KING; ++i) {
+                auto p = pieces[i];
+                features_unordered[i] = offset + static_cast<int>(p);
+            }
+            std::sort(features_unordered, features_unordered + PIECE_NUMBER_KING);
+            for (int k = 0; k < PIECE_NUMBER_KING; ++k)
+            {
+                int idx = counter * 2;
+                features[idx] = i;
+                features[idx + 1] = features_unordered[k];
+                values[counter] = 1.0f;
+                counter += 1;
+            }
+        }
+        offset += PIECE_INPUTS;
+
+        if constexpr (IncludeSQ)
+        {
+            int features_unordered[38];
+            for (PieceNumber i = PIECE_NUMBER_ZERO; i < PIECE_NUMBER_KING; ++i) {
+                auto p = pieces[i];
+                features_unordered[i] = offset + piece_sq_index(p);
+            }
+            std::sort(features_unordered, features_unordered + PIECE_NUMBER_KING);
+            for (int k = 0; k < PIECE_NUMBER_KING; ++k)
+            {
+                int idx = counter * 2;
+                features[idx] = i;
+                features[idx + 1] = features_unordered[k];
+                values[counter] = 1.0f;
+                counter += 1;
+            }
+            offset += SQ_INPUTS;
+        }
+
+        if constexpr (IncludePTC)
+        {
+            bool seen[PIECE_TYPE_COLOR_INPUTS] = {};
+            for (PieceNumber i = PIECE_NUMBER_ZERO; i < PIECE_NUMBER_KING; ++i) {
+                auto p = pieces[i];
+                seen[piece_type_color_index(p)] = true;
+            }
+
+            for (int k = 0; k < PIECE_TYPE_COLOR_INPUTS; ++k)
+            {
+                if (!seen[k]) continue;
+                int idx = counter * 2;
+                features[idx] = i;
+                features[idx + 1] = offset + k;
+                values[counter] = 1.0f;
+                counter += 1;
+            }
+        }
+    }
+};
+
+using HalfKPSQ = HalfKPFactorizedExtended<true, false>;
+using HalfKPPTC = HalfKPFactorizedExtended<false, true>;
+
 // struct HalfKA {
 //     static constexpr int NUM_SQ = 64;
 //     static constexpr int NUM_PT = 12;
@@ -664,6 +776,14 @@ extern "C" {
         {
             return new SparseBatch(FeatureSet<HalfKPx4>{}, entries);
         }
+        else if (feature_set == "HalfKPSQ")
+        {
+            return new SparseBatch(FeatureSet<HalfKPSQ>{}, entries);
+        }
+        else if (feature_set == "HalfKPPTC")
+        {
+            return new SparseBatch(FeatureSet<HalfKPPTC>{}, entries);
+        }
         // else if (feature_set == "HalfKA")
         // {
         //     return new SparseBatch(FeatureSet<HalfKA>{}, entries);
@@ -716,6 +836,14 @@ extern "C" {
         else if (feature_set == "HalfKPx4")
         {
             return new FeaturedBatchStream<FeatureSet<HalfKPx4>, SparseBatch>(concurrency, filename, batch_size, cyclic, skipPredicate);
+        }
+        else if (feature_set == "HalfKPSQ")
+        {
+            return new FeaturedBatchStream<FeatureSet<HalfKPSQ>, SparseBatch>(concurrency, filename, batch_size, cyclic, skipPredicate);
+        }
+        else if (feature_set == "HalfKPPTC")
+        {
+            return new FeaturedBatchStream<FeatureSet<HalfKPPTC>, SparseBatch>(concurrency, filename, batch_size, cyclic, skipPredicate);
         }
         // else if (feature_set == "HalfKA")
         // {

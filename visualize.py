@@ -468,7 +468,7 @@ def main():
     features.add_argparse_args(parser)
     args = parser.parse_args()
 
-    supported_features = ('HalfKP', 'HalfKP^', 'HalfKPx4')
+    supported_features = ('HalfKP', 'HalfKP^', 'HalfKPSQ', 'HalfKPPTC', 'HalfKPx4')
     assert args.features in supported_features
     feature_set = features.get_feature_set_from_name(args.features)
 

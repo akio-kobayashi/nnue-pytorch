@@ -21,6 +21,13 @@ def halfkp_idx(is_white_pov: bool, king_sq: int, sq: int, p: chess.Piece):
 def halfkp_piece_type_color_idx(is_white_pov: bool, p: chess.Piece):
   return (p.piece_type - 1) * 2 + (p.color != is_white_pov) + 1
 
+
+def halfkp_piece_plane_idx(is_white_pov: bool, sq: int, p: chess.Piece):
+  sq_idx = orient(is_white_pov, sq)
+  ptc_idx = halfkp_piece_type_color_idx(is_white_pov, p)
+  plane_idx = 1 + sq_idx + (ptc_idx - 1) * NUM_SQ
+  return plane_idx, sq_idx, ptc_idx
+
 class Features(FeatureBlock):
   def __init__(self):
     super(Features, self).__init__('HalfKP', 0x5d69d5b8, OrderedDict([('HalfKP', NUM_PLANES * NUM_SQ)]))
@@ -67,20 +74,25 @@ class FactorizedFeatures(FeatureBlock):
     return [idx, self.get_factor_base_feature('HalfK') + k_idx, self.get_factor_base_feature('P') + p_idx]
 
 
-class MultiFactorizedFeatures(FeatureBlock):
-  def __init__(self):
-    super(MultiFactorizedFeatures, self).__init__(
-        'HalfKPx4',
+class _BaseMultiFactorizedFeatures(FeatureBlock):
+  def __init__(self, name, include_sq, include_ptc):
+    factors = OrderedDict([
+        ('HalfKP', NUM_PLANES * NUM_SQ),
+        ('HalfK', NUM_SQ),
+        ('P', NUM_PLANES),
+    ])
+    if include_sq:
+      factors['SQ'] = NUM_SQ
+    if include_ptc:
+      factors['PTC'] = NUM_PTC
+    super(_BaseMultiFactorizedFeatures, self).__init__(
+        name,
         0x5d69d5b8,
-        OrderedDict([
-            ('HalfKP', NUM_PLANES * NUM_SQ),
-            ('HalfK', NUM_SQ),
-            ('P', NUM_PLANES),
-            ('SQ', NUM_SQ),
-            ('PTC', NUM_PTC),
-        ]),
+        factors,
         main_factor_name='HalfKP')
     self.base = Features()
+    self.include_sq = include_sq
+    self.include_ptc = include_ptc
 
   @staticmethod
   def _plane_to_sq_ptc(plane_idx):
@@ -96,8 +108,8 @@ class MultiFactorizedFeatures(FeatureBlock):
     white, black = self.base.get_active_features(board)
     halfk_base = self.get_factor_base_feature('HalfK')
     p_base = self.get_factor_base_feature('P')
-    sq_base = self.get_factor_base_feature('SQ')
-    ptc_base = self.get_factor_base_feature('PTC')
+    sq_base = self.get_factor_base_feature('SQ') if self.include_sq else None
+    ptc_base = self.get_factor_base_feature('PTC') if self.include_ptc else None
 
     def piece_features(base, color):
       indices = torch.zeros(self.num_features)
@@ -109,36 +121,57 @@ class MultiFactorizedFeatures(FeatureBlock):
           continue
 
         piece_count += 1
-        sq_idx = orient(color, sq)
-        ptc_idx = halfkp_piece_type_color_idx(color, p)
-        plane_idx = 1 + sq_idx + (ptc_idx - 1) * NUM_SQ
+        plane_idx, sq_idx, ptc_idx = halfkp_piece_plane_idx(color, sq, p)
         indices[p_base + plane_idx] = 1.0
-        indices[sq_base + sq_idx] = 1.0
-        indices[ptc_base + ptc_idx] = 1.0
+        if self.include_sq:
+          indices[sq_base + sq_idx] = 1.0
+        if self.include_ptc:
+          indices[ptc_base + ptc_idx] = 1.0
 
       indices[halfk_base + orient(color, board.king(color))] = piece_count
       return indices
 
     return (piece_features(white, chess.WHITE), piece_features(black, chess.BLACK))
 
-  def get_feature_factors(self, idx):
+  def _get_base_feature_factors(self, idx):
     if idx >= self.num_real_features:
       raise Exception('Feature must be real')
 
     k_idx = idx // NUM_PLANES
     plane_idx = idx % NUM_PLANES
-    sq_idx, ptc_idx = self._plane_to_sq_ptc(plane_idx)
-
     return [
         idx,
         self.get_factor_base_feature('HalfK') + k_idx,
         self.get_factor_base_feature('P') + plane_idx,
-        self.get_factor_base_feature('SQ') + sq_idx,
-        self.get_factor_base_feature('PTC') + ptc_idx,
     ]
+
+  def get_feature_factors(self, idx):
+    factors = self._get_base_feature_factors(idx)
+    plane_idx = idx % NUM_PLANES
+    sq_idx, ptc_idx = self._plane_to_sq_ptc(plane_idx)
+    if self.include_sq:
+      factors.append(self.get_factor_base_feature('SQ') + sq_idx)
+    if self.include_ptc:
+      factors.append(self.get_factor_base_feature('PTC') + ptc_idx)
+    return factors
+
+
+class HalfKPSQFeatures(_BaseMultiFactorizedFeatures):
+  def __init__(self):
+    super(HalfKPSQFeatures, self).__init__('HalfKPSQ', include_sq=True, include_ptc=False)
+
+
+class HalfKPPTCFeatures(_BaseMultiFactorizedFeatures):
+  def __init__(self):
+    super(HalfKPPTCFeatures, self).__init__('HalfKPPTC', include_sq=False, include_ptc=True)
+
+
+class MultiFactorizedFeatures(_BaseMultiFactorizedFeatures):
+  def __init__(self):
+    super(MultiFactorizedFeatures, self).__init__('HalfKPx4', include_sq=True, include_ptc=True)
 
 '''
 This is used by the features module for discovery of feature blocks.
 '''
 def get_feature_block_clss():
-  return [Features, FactorizedFeatures, MultiFactorizedFeatures]
+  return [Features, FactorizedFeatures, HalfKPSQFeatures, HalfKPPTCFeatures, MultiFactorizedFeatures]
