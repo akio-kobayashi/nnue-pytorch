@@ -31,6 +31,7 @@ class NNUE(pl.LightningModule):
       teacher_temperature: float = 1.0, entropy_coef: float = 1.0, outcome_pos_weight: float = 1.0,
       corn_aux_weight: float = 0.0, corn_aux_thresholds: list[float] | None = None,
       king_zone_aux_weight: float = 0.0, major_safety_aux_weight: float = 0.0,
+      input_regularization_enabled: bool = False,
       accumulator_mean_min: float = 0.0, accumulator_mean_max: float = 1.0,
       accumulator_mean_band_weight: float = 0.0,
       accumulator_upper_saturation_target: float = 0.0, accumulator_upper_saturation_weight: float = 0.0,
@@ -82,6 +83,7 @@ class NNUE(pl.LightningModule):
     self.corn_aux_thresholds = sorted(float(v) for v in corn_aux_thresholds)
     self.king_zone_aux_weight = max(float(king_zone_aux_weight), 0.0)
     self.major_safety_aux_weight = max(float(major_safety_aux_weight), 0.0)
+    self.input_regularization_enabled = bool(input_regularization_enabled)
     self.accumulator_mean_min = float(accumulator_mean_min)
     self.accumulator_mean_max = float(accumulator_mean_max)
     self.accumulator_mean_band_weight = max(float(accumulator_mean_band_weight), 0.0)
@@ -166,6 +168,9 @@ class NNUE(pl.LightningModule):
 
   def _compute_accumulator_regularization(self, accumulator_pre: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
     zero = accumulator_pre.new_zeros(())
+    stats = torch.stack([zero, zero, zero])
+    if not self.input_regularization_enabled:
+      return zero, zero, zero, stats
     mean_band_loss = zero
     upper_saturation_loss = zero
     lower_saturation_loss = zero
@@ -198,6 +203,8 @@ class NNUE(pl.LightningModule):
     return mean_band_loss, upper_saturation_loss, lower_saturation_loss, stats
 
   def _compute_embedding_norm_regularization(self) -> Tensor:
+    if not self.input_regularization_enabled:
+      return self.input.weight.new_zeros(())
     if self.embedding_norm_weight <= 0.0 or self.embedding_norm_target <= 0.0:
       return self.input.weight.new_zeros(())
     embedding_norms = torch.linalg.vector_norm(self.input.weight, dim=0)
@@ -313,17 +320,18 @@ class NNUE(pl.LightningModule):
       self.log(f"{loss_type}_king_zone_aux", king_zone_aux_loss.mean())
     if self.major_safety_aux_weight > 0.0 and aux_targets is not None:
       self.log(f"{loss_type}_major_safety_aux", major_safety_aux_loss.mean())
-    if self.accumulator_mean_band_weight > 0.0:
+    if self.input_regularization_enabled and self.accumulator_mean_band_weight > 0.0:
       self.log(f"{loss_type}_acc_mean_band", accumulator_mean_band_loss)
-    if self.accumulator_upper_saturation_weight > 0.0:
+    if self.input_regularization_enabled and self.accumulator_upper_saturation_weight > 0.0:
       self.log(f"{loss_type}_acc_upper_sat", accumulator_upper_saturation_loss)
-    if self.accumulator_lower_saturation_weight > 0.0:
+    if self.input_regularization_enabled and self.accumulator_lower_saturation_weight > 0.0:
       self.log(f"{loss_type}_acc_lower_sat", accumulator_lower_saturation_loss)
-    if self.embedding_norm_weight > 0.0:
+    if self.input_regularization_enabled and self.embedding_norm_weight > 0.0:
       self.log(f"{loss_type}_emb_norm", embedding_norm_loss)
-    self.log(f"{loss_type}_acc_mean", accumulator_stats[0])
-    self.log(f"{loss_type}_acc_upper_sat_rate", accumulator_stats[1])
-    self.log(f"{loss_type}_acc_lower_sat_rate", accumulator_stats[2])
+    if self.input_regularization_enabled:
+      self.log(f"{loss_type}_acc_mean", accumulator_stats[0])
+      self.log(f"{loss_type}_acc_upper_sat_rate", accumulator_stats[1])
+      self.log(f"{loss_type}_acc_lower_sat_rate", accumulator_stats[2])
     return loss
 
   def _iter_ema_parameters(self) -> Iterator[tuple[str, Tensor]]:
