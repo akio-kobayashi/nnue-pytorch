@@ -1,0 +1,41 @@
+model:
+  lr: [0.0003]
+  lambda_: [1.0]
+  label_smoothing_eps: 0.0
+  num_batches_warmup: 4000
+  score_scaling: 361
+  ply_begin_threshold: 100.0
+  ply_end_threshold: 120.0
+  teacher_temperature: 1.0
+  entropy_coef: 1.0
+  outcome_pos_weight: 1.0
+  optimizer: adamw
+  weight_decay: 0.01
+  momentum: 0.9
+  d_model: 256
+  num_heads: 8
+  num_layers: 6
+  ff_mult: 4
+  dropout: 0.1
+  mlp_hidden_dim: 256
+  ema_enabled: false
+  ema_decay: 0.9995
+  ema_update_every: 1
+  ema_start_step: 1000
+
+data:
+  train: ../train.bin
+  val: ../val.bin
+  smart_fen_skipping: true
+  random_fen_skipping: 10
+  batch_size: 256
+  num_workers: 8
+  threads: 8
+  epoch_size: 2000000
+  validation_size: 200000
+
+trainer:
+  accelerator: gpu
+  devices: 1
+  gradient_clip_val: 1.0
+  max_epochs: 100

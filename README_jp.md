@@ -195,6 +195,22 @@ python train.py --gpus 1 ...
 python train.py ... --features="HalfKP^"
 ```
 
+### dlshogi入力特徴量 + Transformer で NNUE評価値を回帰する
+
+`train/val.bin` は C++ データローダで読み、その場で DeepLearningShogi 相当の入力特徴量へ変換します。
+Transformer 側は `score` を NNUE と同じ teacher / outcome 混合 loss で学習します。
+
+```bash
+source .venv-cpu/bin/activate
+sh compile_data_loader.sh
+python train_dlshogi_transformer.py fit \
+  --config config_dlshogi_transformer.yaml \
+  --data.train /path/to/train.bin \
+  --data.val /path/to/val.bin
+```
+
+GPU メモリ消費は HalfKP より大きいので、まずは `--data.batch_size 128` か `256` 付近から始めるのを推奨します。
+
 ## `shogi_ai` と組み合わせる場合
 
 `.bin` を `shogi_ai/wsl2/src/create_dataset.py` で作るなら、局面選別は `shogi_ai` 側を source of truth としてください。

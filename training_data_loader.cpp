@@ -328,6 +328,230 @@ private:
     }
 };
 
+namespace dlshogi {
+
+    constexpr int MAX_HPAWN_NUM = 8;
+    constexpr int MAX_HLANCE_NUM = 4;
+    constexpr int MAX_HKNIGHT_NUM = 4;
+    constexpr int MAX_HSILVER_NUM = 4;
+    constexpr int MAX_HGOLD_NUM = 4;
+    constexpr int MAX_HBISHOP_NUM = 2;
+    constexpr int MAX_HROOK_NUM = 2;
+
+    constexpr int MAX_PIECES_IN_HAND[] = {
+        MAX_HPAWN_NUM,
+        MAX_HLANCE_NUM,
+        MAX_HKNIGHT_NUM,
+        MAX_HSILVER_NUM,
+        MAX_HGOLD_NUM,
+        MAX_HBISHOP_NUM,
+        MAX_HROOK_NUM,
+    };
+    constexpr int NUM_HAND_PIECE_TYPES = sizeof(MAX_PIECES_IN_HAND) / sizeof(MAX_PIECES_IN_HAND[0]);
+    constexpr PieceType HAND_PIECE_TYPES[] = {
+        PAWN,
+        LANCE,
+        KNIGHT,
+        SILVER,
+        GOLD,
+        BISHOP,
+        ROOK,
+    };
+
+    constexpr int PIECETYPE_NUM = 14;
+    constexpr int MAX_ATTACK_NUM = 3;
+    constexpr int MAX_PIECES_IN_HAND_SUM =
+        MAX_HPAWN_NUM + MAX_HLANCE_NUM + MAX_HKNIGHT_NUM + MAX_HSILVER_NUM +
+        MAX_HGOLD_NUM + MAX_HBISHOP_NUM + MAX_HROOK_NUM;
+    constexpr int FEATURES1_PER_COLOR = PIECETYPE_NUM + PIECETYPE_NUM + MAX_ATTACK_NUM;
+    constexpr int MAX_FEATURES1_NUM = 2 * FEATURES1_PER_COLOR;
+    constexpr int MAX_FEATURES2_NUM = 2 * MAX_PIECES_IN_HAND_SUM + 1;
+    constexpr int NUM_SQUARES = SQ_NB;
+
+    inline int feature1_index(Color c, int f1idx, Square sq)
+    {
+        return (((int)c * FEATURES1_PER_COLOR) + f1idx) * NUM_SQUARES + (int)sq;
+    }
+
+    inline int feature2_index(int f2idx, Square sq)
+    {
+        return f2idx * NUM_SQUARES + (int)sq;
+    }
+
+    inline void set_features1(float* features1, Color c, int f1idx, Square sq)
+    {
+        features1[feature1_index(c, f1idx, sq)] = 1.0f;
+    }
+
+    inline void fill_features2_plane(float* features2, int f2idx)
+    {
+        auto* dst = features2 + f2idx * NUM_SQUARES;
+        std::fill_n(dst, NUM_SQUARES, 1.0f);
+    }
+
+    inline void fill_features2_hand(float* features2, Color c, int offset, int num)
+    {
+        const int start = (int)c * MAX_PIECES_IN_HAND_SUM + offset;
+        for (int i = 0; i < num; ++i)
+        {
+            fill_features2_plane(features2, start + i);
+        }
+    }
+
+    template <Color SideToMove>
+    void fill_input_features(const Position& position, float* features1, float* features2)
+    {
+        std::fill_n(features1, MAX_FEATURES1_NUM * NUM_SQUARES, 0.0f);
+        std::fill_n(features2, MAX_FEATURES2_NUM * NUM_SQUARES, 0.0f);
+
+        const Bitboard occupied_bb = position.pieces();
+        const Bitboard pawns_bb = position.pieces(PAWN);
+        const Bitboard without_pawns_bb = occupied_bb & ~pawns_bb;
+
+        uint8_t attack_num[COLOR_NB][NUM_SQUARES] = {};
+
+        for (auto sq : without_pawns_bb)
+        {
+            const Piece pc = position.piece_on(sq);
+            const PieceType pt = type_of(pc);
+            auto c = color_of(pc);
+            auto sq_oriented = sq;
+            auto attacks = effects_from(pc, sq, occupied_bb);
+
+            if constexpr (SideToMove == WHITE)
+            {
+                c = ~c;
+                sq_oriented = Inv(sq);
+            }
+
+            set_features1(features1, c, (int)pt - 1, sq_oriented);
+
+            for (auto to : attacks)
+            {
+                auto to_oriented = to;
+                if constexpr (SideToMove == WHITE)
+                {
+                    to_oriented = Inv(to);
+                }
+
+                set_features1(features1, c, PIECETYPE_NUM + (int)pt - 1, to_oriented);
+
+                auto& num = attack_num[(int)c][(int)to_oriented];
+                if (num < MAX_ATTACK_NUM)
+                {
+                    set_features1(features1, c, PIECETYPE_NUM + PIECETYPE_NUM + num, to_oriented);
+                    ++num;
+                }
+            }
+        }
+
+        for (Color c = BLACK; c < COLOR_NB; ++c)
+        {
+            const Color board_color = SideToMove == BLACK ? c : ~c;
+            auto pawns = pawns_bb & position.pieces(board_color);
+
+            for (auto sq : pawns)
+            {
+                auto sq_oriented = sq;
+                if constexpr (SideToMove == WHITE)
+                {
+                    sq_oriented = Inv(sq);
+                }
+
+                set_features1(features1, c, (int)PAWN - 1, sq_oriented);
+
+                const Piece pawn = make_piece(board_color, PAWN);
+                auto attacks = effects_from(pawn, sq, occupied_bb);
+                for (auto to : attacks)
+                {
+                    auto to_oriented = to;
+                    if constexpr (SideToMove == WHITE)
+                    {
+                        to_oriented = Inv(to);
+                    }
+
+                    set_features1(features1, c, PIECETYPE_NUM + (int)PAWN - 1, to_oriented);
+
+                    auto& num = attack_num[(int)c][(int)to_oriented];
+                    if (num < MAX_ATTACK_NUM)
+                    {
+                        set_features1(features1, c, PIECETYPE_NUM + PIECETYPE_NUM + num, to_oriented);
+                        ++num;
+                    }
+                }
+            }
+
+            const Hand hand = position.hand_of(board_color);
+            int offset = 0;
+            for (int hp = 0; hp < NUM_HAND_PIECE_TYPES; ++hp)
+            {
+                const int num = std::min(hand_count(hand, HAND_PIECE_TYPES[hp]), MAX_PIECES_IN_HAND[hp]);
+                fill_features2_hand(features2, c, offset, num);
+                offset += MAX_PIECES_IN_HAND[hp];
+            }
+        }
+
+        if (position.in_check())
+        {
+            fill_features2_plane(features2, 2 * MAX_PIECES_IN_HAND_SUM);
+        }
+    }
+
+    struct Batch
+    {
+        static constexpr bool IS_BATCH = true;
+
+        template <typename IgnoredFeatureSetT>
+        Batch(IgnoredFeatureSetT, const std::vector<TrainingDataEntry>& entries)
+        {
+            size = entries.size();
+            features1 = new float[size * MAX_FEATURES1_NUM * NUM_SQUARES];
+            features2 = new float[size * MAX_FEATURES2_NUM * NUM_SQUARES];
+            outcome = new float[size];
+            score = new float[size];
+            ply = new float[size];
+
+            const int features1_stride = MAX_FEATURES1_NUM * NUM_SQUARES;
+            const int features2_stride = MAX_FEATURES2_NUM * NUM_SQUARES;
+
+            for (int i = 0; i < entries.size(); ++i)
+            {
+                const auto& e = entries[i];
+                outcome[i] = (e.result + 1.0f) / 2.0f;
+                score[i] = e.score;
+                ply[i] = e.ply;
+
+                auto* features1_dst = features1 + i * features1_stride;
+                auto* features2_dst = features2 + i * features2_stride;
+                if (e.pos->side_to_move() == BLACK)
+                {
+                    fill_input_features<BLACK>(*e.pos, features1_dst, features2_dst);
+                }
+                else
+                {
+                    fill_input_features<WHITE>(*e.pos, features1_dst, features2_dst);
+                }
+            }
+        }
+
+        int size;
+        float* features1;
+        float* features2;
+        float* outcome;
+        float* score;
+        float* ply;
+
+        ~Batch()
+        {
+            delete[] features1;
+            delete[] features2;
+            delete[] outcome;
+            delete[] score;
+            delete[] ply;
+        }
+    };
+}
+
 struct AnyStream
 {
     virtual ~AnyStream() = default;
@@ -629,6 +853,57 @@ extern "C" {
     EXPORT void CDECL destroy_sparse_batch(SparseBatch* e)
     {
         delete e;
+    }
+
+    EXPORT Stream<dlshogi::Batch>* CDECL create_dlshogi_batch_stream(const char* filename, int concurrency, int batch_size, bool cyclic, bool filtered, int random_fen_skipping)
+    {
+        EnsureInitialize();
+
+        std::function<bool(const TrainingDataEntry&)> skipPredicate = nullptr;
+        if (filtered || random_fen_skipping)
+        {
+            skipPredicate = [
+                random_fen_skipping,
+                    prob = double(random_fen_skipping) / (random_fen_skipping + 1),
+                    filtered
+            ](const TrainingDataEntry& e){
+
+                    auto do_skip = [&]() {
+                        std::bernoulli_distribution distrib(prob);
+                        auto& prng = rng::get_thread_local_rng();
+                        return distrib(prng);
+                    };
+
+                    auto do_filter = [&]() {
+                        return (e.isCapturingMove() || e.isInCheck());
+                    };
+
+                    return (random_fen_skipping && do_skip()) || (filtered && do_filter());
+                };
+        }
+
+        return new FeaturedBatchStream<FeatureSet<HalfKP>, dlshogi::Batch>(
+            concurrency,
+            filename,
+            batch_size,
+            cyclic,
+            skipPredicate
+        );
+    }
+
+    EXPORT void CDECL destroy_dlshogi_batch_stream(Stream<dlshogi::Batch>* stream)
+    {
+        delete stream;
+    }
+
+    EXPORT dlshogi::Batch* CDECL fetch_next_dlshogi_batch(Stream<dlshogi::Batch>* stream)
+    {
+        return stream->next();
+    }
+
+    EXPORT void CDECL destroy_dlshogi_batch(dlshogi::Batch* batch)
+    {
+        delete batch;
     }
 
 }
