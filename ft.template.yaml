@@ -1,14 +1,14 @@
 model:
-  base_ckpt: ./pretrained.ckpt
+  base_ckpt: __BASE_CKPT__
   use_ema_weights: false
   freeze_input: false
   freeze_l1: false
   freeze_l2: false
   freeze_output: false
   freeze_aux_heads: true
-  l1_size: 1024
-  l2_size: 8
-  l3_size: 96
+  l1_size: __L1_SIZE__
+  l2_size: __L2_SIZE__
+  l3_size: __L3_SIZE__
   lambda_: [1.0]
   lr: [0.1]
   label_smoothing_eps: 0.0
@@ -52,10 +52,10 @@ trainer:
   accelerator: gpu
   devices: 1
   max_epochs: 30
-  default_root_dir: ./runs/ft/default
+  default_root_dir: __RUN_DIR__
   logger:
     class_path: pytorch_lightning.loggers.TensorBoardLogger
     init_args:
-      save_dir: ./runs/ft
-      name: default
+      save_dir: __RUNS_ROOT__
+      name: __RUN_NAME__
       version: ""
