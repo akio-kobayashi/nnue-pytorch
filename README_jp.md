@@ -211,6 +211,21 @@ python train_dlshogi_transformer.py fit \
 
 GPU メモリ消費は HalfKP より大きいので、まずは `--data.batch_size 128` か `256` 付近から始めるのを推奨します。
 
+巨大データでまず高速に傾向を見たい場合は、軽量プリセットも使えます。
+
+```bash
+python train_dlshogi_transformer.py fit \
+  --config config_dlshogi_transformer_fast.yaml \
+  --data.train /path/to/train.bin \
+  --data.val /path/to/val.bin
+```
+
+このプリセットは以下を優先します。
+
+- Transformer を小さくする
+- `bf16-mixed` を使って GPU スループットを上げる
+- `epoch_size` / `validation_size` を絞って試行回数を増やす
+
 ## `shogi_ai` と組み合わせる場合
 
 `.bin` を `shogi_ai/wsl2/src/create_dataset.py` で作るなら、局面選別は `shogi_ai` 側を source of truth としてください。

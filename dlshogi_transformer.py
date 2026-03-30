@@ -38,6 +38,7 @@ class DLShogiTransformer(pl.LightningModule):
         ema_decay: float = 0.9995,
         ema_update_every: int = 1,
         ema_start_step: int = 1000,
+        train_loss_ema_beta: float = 0.98,
     ):
         super().__init__()
         if lr is None:
@@ -70,8 +71,10 @@ class DLShogiTransformer(pl.LightningModule):
         self.ema_decay = ema_decay
         self.ema_update_every = max(1, int(ema_update_every))
         self.ema_start_step = max(0, int(ema_start_step))
+        self.train_loss_ema_beta = min(max(float(train_loss_ema_beta), 0.0), 0.9999)
         self._ema_state: TensorDict = {}
         self._ema_backup: TensorDict | None = None
+        self._train_loss_ema: Tensor | None = None
         self.warmup_start_global_step = 0
 
         self.square_proj = nn.Linear(self.FEATURES1_NUM, d_model)
@@ -150,7 +153,41 @@ class DLShogiTransformer(pl.LightningModule):
         result = lambda_ * teacher_loss + (1.0 - lambda_) * outcome_loss
         entropy = lambda_ * teacher_entropy + (1.0 - lambda_) * outcome_entropy
         loss = result.mean() - self.entropy_coef * entropy.mean()
-        self.log(loss_type, loss)
+        batch_size = features1.shape[0]
+
+        if loss_type == "train_loss":
+            self.log("train_loss_step", loss, on_step=True, on_epoch=False, batch_size=batch_size)
+            self.log("train_loss", loss, on_step=False, on_epoch=True, prog_bar=True, batch_size=batch_size)
+            self.log(
+                "train_teacher_loss",
+                teacher_loss.mean(),
+                on_step=False,
+                on_epoch=True,
+                batch_size=batch_size,
+            )
+            self.log(
+                "train_outcome_loss",
+                outcome_loss.mean(),
+                on_step=False,
+                on_epoch=True,
+                batch_size=batch_size,
+            )
+
+            detached_loss = loss.detach()
+            if self._train_loss_ema is None:
+                self._train_loss_ema = detached_loss
+            else:
+                beta = self.train_loss_ema_beta
+                self._train_loss_ema = beta * self._train_loss_ema + (1.0 - beta) * detached_loss
+            self.log(
+                "train_loss_ema",
+                self._train_loss_ema,
+                on_step=True,
+                on_epoch=False,
+                batch_size=batch_size,
+            )
+        else:
+            self.log(loss_type, loss, on_step=False, on_epoch=True, prog_bar=(loss_type == "val_loss"), batch_size=batch_size)
         return loss
 
     def training_step(self, batch: Batch, batch_idx: int) -> Tensor:

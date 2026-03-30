@@ -1,8 +1,8 @@
 model:
-  lr: [0.0001]
+  lr: [0.00015]
   lambda_: [1.0]
   label_smoothing_eps: 0.0
-  num_batches_warmup: 8000
+  num_batches_warmup: 4000
   score_scaling: 361
   ply_begin_threshold: 100.0
   ply_end_threshold: 120.0
@@ -12,12 +12,12 @@ model:
   optimizer: adamw
   weight_decay: 0.01
   momentum: 0.9
-  d_model: 256
-  num_heads: 8
-  num_layers: 6
-  ff_mult: 4
+  d_model: 128
+  num_heads: 4
+  num_layers: 3
+  ff_mult: 2
   dropout: 0.1
-  mlp_hidden_dim: 256
+  mlp_hidden_dim: 128
   ema_enabled: false
   ema_decay: 0.9995
   ema_update_every: 1
@@ -29,21 +29,22 @@ data:
   val: ../val.bin
   smart_fen_skipping: true
   random_fen_skipping: 10
-  batch_size: 256
+  batch_size: 512
   num_workers: 8
   threads: 8
-  epoch_size: 2000000
-  validation_size: 200000
+  epoch_size: 1000000
+  validation_size: 100000
 
 trainer:
   accelerator: gpu
   devices: 1
+  precision: bf16-mixed
   gradient_clip_val: 0.5
-  max_epochs: 100
-  default_root_dir: ./runs/dlshogi_transformer/default
+  max_epochs: 50
+  default_root_dir: ./runs/dlshogi_transformer/fast
   logger:
     class_path: pytorch_lightning.loggers.TensorBoardLogger
     init_args:
       save_dir: ./runs/dlshogi_transformer
-      name: default
+      name: fast
       version: ""

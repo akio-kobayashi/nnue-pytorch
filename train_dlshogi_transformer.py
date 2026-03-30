@@ -18,6 +18,9 @@ def _default_batch_size() -> int:
     return 64 if not torch.cuda.is_available() else 256
 
 
+torch.set_float32_matmul_precision("high")
+
+
 class DLShogiDataModule(pl.LightningDataModule):
     def __init__(
         self,
