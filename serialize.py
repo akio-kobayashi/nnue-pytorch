@@ -126,7 +126,7 @@ class NNUEWriter():
     self.buf.extend(description)
 
   def coalesce_ft_weights(self, model, layer):
-    weight = layer.weight.data
+    weight = model.get_effective_input_weight().detach()
     indices = model.feature_set.get_virtual_to_real_features_gather_indices()
     weight_coalesced = weight.new_zeros((weight.shape[0], model.feature_set.num_real_features))
     for i_real, is_virtual in enumerate(indices):
@@ -181,8 +181,7 @@ class NNUEWriter():
   def write_feature_transformer(self, model):
     # int16 bias = round(x * 127)
     # int16 weight = round(x * 127)
-    layer = model.input
-    bias = layer.bias.data
+    bias = model.get_effective_input_bias().detach()
     bias = self.stochastic_round_cpp(bias * 127).to(torch.int16)
     ascii_hist('ft bias:', bias.numpy())
     self.save_histogram(f'{self.figure_index:02}_feature_transformer_bias.png', bias, 'bias', 'frequency', 'feature transformer bias')

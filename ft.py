@@ -1,4 +1,5 @@
 import model as M
+import features as features_module
 import pytorch_lightning as pl
 import torch
 from pytorch_lightning.cli import LightningCLI
@@ -17,6 +18,15 @@ def _load_checkpoint_state(base_ckpt: str):
   raise TypeError(f"Unsupported checkpoint format for {base_ckpt}")
 
 
+def _infer_features_from_state_dict(state_dict) -> str:
+  input_dim = state_dict["input.weight"].shape[1]
+  for feature_name in features_module.get_available_feature_blocks_names():
+    feature_set = features_module.get_feature_set_from_name(feature_name)
+    if feature_set.num_real_features == input_dim or feature_set.num_features == input_dim:
+      return feature_name
+  raise ValueError(f"Could not infer feature set from input dimension {input_dim}")
+
+
 class FineTuningNNUE(M.NNUE):
   def __init__(
       self,
@@ -30,14 +40,28 @@ class FineTuningNNUE(M.NNUE):
       freeze_aux_heads: bool = True,
       **kwargs,
   ):
-    super().__init__(features=features, **kwargs)
     if not base_ckpt:
       raise ValueError("base_ckpt must be provided for fine-tuning")
 
+    adapter_config = {
+        "input_adapter": kwargs.pop("input_adapter", "none"),
+        "input_adapter_rank": kwargs.pop("input_adapter_rank", 8),
+        "input_adapter_alpha": kwargs.pop("input_adapter_alpha", 1.0),
+        "input_adapter_init_std": kwargs.pop("input_adapter_init_std", 1e-3),
+        "freeze_base_input": kwargs.pop("freeze_base_input", False),
+    }
+
     state_dict, checkpoint = _load_checkpoint_state(base_ckpt)
+    checkpoint_features = _infer_features_from_state_dict(state_dict)
+    super().__init__(features=checkpoint_features, input_adapter="none", **kwargs)
     self.load_state_dict(state_dict, strict=True)
     if checkpoint and hasattr(self, "on_load_checkpoint"):
       self.on_load_checkpoint(checkpoint)
+
+    if features != checkpoint_features:
+      self.set_feature_set(features_module.get_feature_set_from_name(features))
+
+    self.configure_input_adapter(**adapter_config)
 
     if use_ema_weights:
       if not hasattr(self, "apply_ema_weights") or not self.apply_ema_weights():
@@ -68,6 +92,7 @@ class FineTuningNNUE(M.NNUE):
   ) -> None:
     if freeze_input:
       self._freeze_module(self.input)
+      self.freeze_input_adapter_parameters()
     if freeze_l1:
       self._freeze_module(self.l1)
     if freeze_l2:

@@ -30,7 +30,9 @@ class NNUE(pl.LightningModule):
       ema_enabled: bool = False, ema_decay: float = 0.9995, ema_update_every: int = 1, ema_start_step: int = 1000,
       teacher_temperature: float = 1.0, entropy_coef: float = 1.0, outcome_pos_weight: float = 1.0,
       corn_aux_weight: float = 0.0, corn_aux_thresholds: list[float] | None = None,
-      king_zone_aux_weight: float = 0.0, major_safety_aux_weight: float = 0.0):
+      king_zone_aux_weight: float = 0.0, major_safety_aux_weight: float = 0.0,
+      input_adapter: str = "none", input_adapter_rank: int = 8, input_adapter_alpha: float = 1.0,
+      input_adapter_init_std: float = 1e-3, freeze_base_input: bool = False):
     super().__init__()
     if lambda_ is None:
       lambda_ = [1.0]
@@ -77,8 +79,23 @@ class NNUE(pl.LightningModule):
     self.corn_aux_thresholds = sorted(float(v) for v in corn_aux_thresholds)
     self.king_zone_aux_weight = max(float(king_zone_aux_weight), 0.0)
     self.major_safety_aux_weight = max(float(major_safety_aux_weight), 0.0)
+    self.input_adapter = "none"
+    self.input_adapter_rank = max(1, int(input_adapter_rank))
+    self.input_adapter_alpha = float(input_adapter_alpha)
+    self.input_adapter_init_std = max(float(input_adapter_init_std), 0.0)
+    self.freeze_base_input = bool(freeze_base_input)
+    self.input_lora_a: nn.Parameter | None = None
+    self.input_lora_b: nn.Parameter | None = None
+    self.input_factorized_virtual: nn.Parameter | None = None
 
     self._zero_virtual_feature_weights()
+    self.configure_input_adapter(
+        input_adapter=input_adapter,
+        input_adapter_rank=input_adapter_rank,
+        input_adapter_alpha=input_adapter_alpha,
+        input_adapter_init_std=input_adapter_init_std,
+        freeze_base_input=freeze_base_input,
+    )
 
   '''
   We zero all virtual feature weights because during serialization to .nnue
@@ -94,6 +111,74 @@ class NNUE(pl.LightningModule):
       for a, b in self.feature_set.get_virtual_feature_ranges():
         weights[:, a:b] = 0.0
     self.input.weight = nn.Parameter(weights)
+
+  def _set_base_input_trainable(self, trainable: bool) -> None:
+    self.input.weight.requires_grad = trainable
+    if self.input.bias is not None:
+      self.input.bias.requires_grad = trainable
+
+  def _clear_input_adapter_parameters(self) -> None:
+    self.register_parameter("input_lora_a", None)
+    self.register_parameter("input_lora_b", None)
+    self.register_parameter("input_factorized_virtual", None)
+
+  def configure_input_adapter(
+      self,
+      input_adapter: str = "none",
+      input_adapter_rank: int = 8,
+      input_adapter_alpha: float = 1.0,
+      input_adapter_init_std: float = 1e-3,
+      freeze_base_input: bool = False,
+  ) -> None:
+    adapter = input_adapter.lower()
+    if adapter not in ("none", "halfkp_lora", "factorized"):
+      raise ValueError(f"Unsupported input_adapter: {input_adapter}")
+
+    self.input_adapter = adapter
+    self.input_adapter_rank = max(1, int(input_adapter_rank))
+    self.input_adapter_alpha = float(input_adapter_alpha)
+    self.input_adapter_init_std = max(float(input_adapter_init_std), 0.0)
+    self.freeze_base_input = bool(freeze_base_input)
+
+    self._clear_input_adapter_parameters()
+
+    if adapter == "halfkp_lora":
+      in_features = self.input.in_features
+      out_features = self.input.out_features
+      a = self.input.weight.new_zeros((self.input_adapter_rank, in_features))
+      b = self.input.weight.new_zeros((out_features, self.input_adapter_rank))
+      if self.input_adapter_init_std > 0.0:
+        nn.init.normal_(a, mean=0.0, std=self.input_adapter_init_std)
+      self.input_lora_a = nn.Parameter(a)
+      self.input_lora_b = nn.Parameter(b)
+    elif adapter == "factorized":
+      if self.feature_set.num_virtual_features <= 0:
+        raise ValueError("factorized input adapter requires a factorized feature set.")
+      virtual = self.input.weight.new_zeros((self.input.out_features, self.feature_set.num_virtual_features))
+      self.input_factorized_virtual = nn.Parameter(virtual)
+
+    self._set_base_input_trainable(not self.freeze_base_input)
+
+  def freeze_input_adapter_parameters(self) -> None:
+    for name in ("input_lora_a", "input_lora_b", "input_factorized_virtual"):
+      param = getattr(self, name, None)
+      if param is not None:
+        param.requires_grad = False
+
+  def get_effective_input_weight(self) -> Tensor:
+    weight = self.input.weight
+    if self.input_adapter == "halfkp_lora":
+      scale = self.input_adapter_alpha / float(self.input_adapter_rank)
+      return weight + scale * (self.input_lora_b @ self.input_lora_a)
+    if self.input_adapter == "factorized":
+      if self.input_factorized_virtual is None or self.feature_set.num_virtual_features <= 0:
+        return weight
+      real = self.feature_set.num_real_features
+      return torch.cat([weight[:, :real], weight[:, real:] + self.input_factorized_virtual], dim=1)
+    return weight
+
+  def get_effective_input_bias(self) -> Tensor:
+    return self.input.bias
 
   '''
   This method attempts to convert the model from using the self.feature_set
@@ -130,13 +215,24 @@ class NNUE(pl.LightningModule):
       padding = weights.new_zeros((weights.shape[0], new_feature_block.num_virtual_features))
       weights = torch.cat([weights, padding], dim=1)
       self.input.weight = nn.Parameter(weights)
+      self.input.in_features = new_feature_set.num_features
       self.feature_set = new_feature_set
+      if self.input_adapter != "none":
+        self.configure_input_adapter(
+            input_adapter=self.input_adapter,
+            input_adapter_rank=self.input_adapter_rank,
+            input_adapter_alpha=self.input_adapter_alpha,
+            input_adapter_init_std=self.input_adapter_init_std,
+            freeze_base_input=self.freeze_base_input,
+        )
     else:
       raise Exception('Cannot change feature set from {} to {}.'.format(self.feature_set.name, new_feature_set.name))
 
   def _forward_hidden(self, us: Tensor, them: Tensor, w_in: Tensor, b_in: Tensor) -> Tensor:
-    w = self.input(w_in)
-    b = self.input(b_in)
+    effective_weight = self.get_effective_input_weight()
+    effective_bias = self.get_effective_input_bias()
+    w = F.linear(w_in, effective_weight, effective_bias)
+    b = F.linear(b_in, effective_weight, effective_bias)
     l0_ = (us * torch.cat([w, b], dim=1)) + (them * torch.cat([b, w], dim=1))
     # clamp here is used as a clipped relu to (0.0, 1.0)
     l0_ = torch.clamp(l0_, 0.0, 1.0)

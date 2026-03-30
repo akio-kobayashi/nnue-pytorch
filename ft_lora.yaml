@@ -1,0 +1,66 @@
+model:
+  base_ckpt: ./pretrained.ckpt
+  use_ema_weights: false
+  freeze_input: false
+  freeze_l1: false
+  freeze_l2: false
+  freeze_output: false
+  freeze_aux_heads: true
+  input_adapter: halfkp_lora
+  input_adapter_rank: 8
+  input_adapter_alpha: 1.0
+  input_adapter_init_std: 0.001
+  freeze_base_input: true
+  l1_size: 1024
+  l2_size: 8
+  l3_size: 96
+  lambda_: [1.0]
+  lr: [0.1]
+  label_smoothing_eps: 0.0
+  num_batches_warmup: 2000
+  score_scaling: 361
+  momentum: 0.0
+  ema_enabled: false
+  ema_decay: 0.9995
+  ema_update_every: 1
+  ema_start_step: 1000
+  teacher_temperature: 1.0
+  entropy_coef: 1.0
+  outcome_pos_weight: 1.0
+  corn_aux_weight: 0.0
+  corn_aux_thresholds: []
+  king_zone_aux_weight: 0.0
+  major_safety_aux_weight: 0.0
+  ply_begin_threshold: 100.0
+  ply_end_threshold: 120.0
+
+data:
+  features: HalfKP
+  train: ../train.bin
+  val: ../val.bin
+  smart_fen_skipping: true
+  random_fen_skipping: 0
+  batch_size: 16384
+  num_workers: 8
+  threads: 8
+  epoch_size: 5000000
+  validation_size: 500000
+  py_data: false
+  py_data_train_num_workers: 4
+  py_data_val_batch_size: 32
+  py_data_sampling_mode: uniform
+  py_data_sampling_bins: 8
+  py_data_sampling_max_positions: 0
+  py_data_sampling_seed: 42
+
+trainer:
+  accelerator: gpu
+  devices: 1
+  max_epochs: 30
+  default_root_dir: ./runs/ft_lora/default
+  logger:
+    class_path: pytorch_lightning.loggers.TensorBoardLogger
+    init_args:
+      save_dir: ./runs/ft_lora
+      name: default
+      version: ""
