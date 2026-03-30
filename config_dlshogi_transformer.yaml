@@ -39,3 +39,10 @@ trainer:
   devices: 1
   gradient_clip_val: 1.0
   max_epochs: 100
+  default_root_dir: ./runs/dlshogi_transformer/default
+  logger:
+    class_path: pytorch_lightning.loggers.TensorBoardLogger
+    init_args:
+      save_dir: ./runs/dlshogi_transformer
+      name: default
+      version: ""
