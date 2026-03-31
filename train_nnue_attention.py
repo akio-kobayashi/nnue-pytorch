@@ -18,6 +18,15 @@ def _default_batch_size() -> int:
     return 128 if not torch.cuda.is_available() else 8192
 
 
+if hasattr(torch.backends, "cuda"):
+    if hasattr(torch.backends.cuda, "enable_flash_sdp"):
+        torch.backends.cuda.enable_flash_sdp(False)
+    if hasattr(torch.backends.cuda, "enable_mem_efficient_sdp"):
+        torch.backends.cuda.enable_mem_efficient_sdp(False)
+    if hasattr(torch.backends.cuda, "enable_math_sdp"):
+        torch.backends.cuda.enable_math_sdp(True)
+
+
 class ResettableFixedNumBatchesDataset(torch.utils.data.Dataset):
     def __init__(self, dataset, num_batches):
         super().__init__()
@@ -126,4 +135,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

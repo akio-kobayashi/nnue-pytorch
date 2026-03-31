@@ -157,11 +157,17 @@ class NNUEAttention(pl.LightningModule):
       raise RuntimeError("Non-finite values detected in NNUE embedding output.")
     tokens = l0_.reshape(l0_.shape[0], self.num_tokens, self.token_dim)
     tokens = self.token_proj(tokens)
+    if not torch.isfinite(tokens).all():
+      raise RuntimeError("Non-finite values detected after token projection.")
     cls = self.cls_token.expand(tokens.shape[0], -1, -1)
     tokens = torch.cat([cls, tokens], dim=1)
     tokens = tokens + self.pos_embedding
     tokens = self.attention(tokens)
+    if not torch.isfinite(tokens).all():
+      raise RuntimeError("Non-finite values detected in attention output.")
     pooled = self.final_norm(tokens[:, 0])
+    if not torch.isfinite(pooled).all():
+      raise RuntimeError("Non-finite values detected after attention pooling.")
     hidden = torch.clamp(self.head_hidden(pooled), 0.0, 1.0)
     if not torch.isfinite(hidden).all():
       raise RuntimeError("Non-finite values detected in NNUE attention hidden activations.")
