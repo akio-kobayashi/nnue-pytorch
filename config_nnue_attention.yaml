@@ -43,10 +43,10 @@ trainer:
   devices: 1
   gradient_clip_val: 1.0
   max_epochs: 100
-  default_root_dir: /home/akio/nnue-models/data/dlshogi/vanilla/
+  default_root_dir: ./nnue-models/data/attention/vanilla/
   logger:
     class_path: pytorch_lightning.loggers.TensorBoardLogger
     init_args:
-      save_dir: /home/akio/nnue_models/data/dlshogi/vanilla/runs/
+      save_dir: ./nnue_models/data/attention/vanilla/runs/
       name: vanilla
       version: ""
