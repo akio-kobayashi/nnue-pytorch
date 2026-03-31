@@ -48,17 +48,12 @@ class DLShogiDataModule(pl.LightningDataModule):
         if not Path(self.hparams.val).exists():
             raise FileNotFoundError(f"{self.hparams.val} does not exist")
 
-        main_device = "cpu"
-        if self.trainer and self.trainer.strategy.root_device.type == "cuda":
-            main_device = f"cuda:{self.trainer.strategy.root_device.index}"
-
         train_infinite = dlshogi_dataset.DlshogiBatchDataset(
             self.hparams.train,
             self.hparams.batch_size,
             num_workers=self.hparams.num_workers,
             filtered=self.hparams.smart_fen_skipping,
             random_fen_skipping=self.hparams.random_fen_skipping,
-            device=main_device,
         )
         val_infinite = dlshogi_dataset.DlshogiBatchDataset(
             self.hparams.val,
@@ -66,7 +61,6 @@ class DLShogiDataModule(pl.LightningDataModule):
             num_workers=self.hparams.num_workers,
             filtered=self.hparams.smart_fen_skipping,
             random_fen_skipping=self.hparams.random_fen_skipping,
-            device=main_device,
         )
         self.train_ds = dlshogi_dataset.FixedNumBatchesDataset(
             train_infinite,

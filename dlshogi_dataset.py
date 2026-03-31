@@ -35,28 +35,29 @@ class DlshogiBatch(ctypes.Structure):
         ("ply", ctypes.POINTER(ctypes.c_float)),
     ]
 
-    def get_tensors(self, device):
+    def get_tensors(self):
+        # Clone into PyTorch-owned memory before the underlying C++ batch is freed.
         features1 = torch.from_numpy(
             np.ctypeslib.as_array(
                 self.features1,
                 shape=(self.size, MAX_FEATURES1_NUM, BOARD_SQUARES),
             )
-        ).pin_memory().to(device=device, non_blocking=True)
+        ).clone().pin_memory()
         features2 = torch.from_numpy(
             np.ctypeslib.as_array(
                 self.features2,
                 shape=(self.size, MAX_FEATURES2_NUM, BOARD_SQUARES),
             )
-        ).pin_memory().to(device=device, non_blocking=True)
+        ).clone().pin_memory()
         outcome = torch.from_numpy(
             np.ctypeslib.as_array(self.outcome, shape=(self.size, 1))
-        ).pin_memory().to(device=device, non_blocking=True)
+        ).clone().pin_memory()
         score = torch.from_numpy(
             np.ctypeslib.as_array(self.score, shape=(self.size, 1))
-        ).pin_memory().to(device=device, non_blocking=True)
+        ).clone().pin_memory()
         ply = torch.from_numpy(
             np.ctypeslib.as_array(self.ply, shape=(self.size, 1))
-        ).pin_memory().to(device=device, non_blocking=True)
+        ).clone().pin_memory()
         return features1, features2, outcome, score, ply
 
 
@@ -98,7 +99,6 @@ class TrainingDataProvider:
         batch_size,
         filtered=False,
         random_fen_skipping=0,
-        device="cpu",
     ):
         self.create_stream = create_stream
         self.destroy_stream = destroy_stream
@@ -110,7 +110,6 @@ class TrainingDataProvider:
         self.batch_size = batch_size
         self.filtered = filtered
         self.random_fen_skipping = random_fen_skipping
-        self.device = device
         self.stream = self.create_stream(
             self.filename,
             self.num_workers,
@@ -127,7 +126,7 @@ class TrainingDataProvider:
         v = self.fetch_next(self.stream)
         if not v:
             raise StopIteration
-        tensors = v.contents.get_tensors(self.device)
+        tensors = v.contents.get_tensors()
         self.destroy_part(v)
         return tensors
 
@@ -145,7 +144,6 @@ class DlshogiBatchProvider(TrainingDataProvider):
         num_workers=1,
         filtered=False,
         random_fen_skipping=0,
-        device="cpu",
     ):
         super().__init__(
             create_dlshogi_batch_stream,
@@ -158,7 +156,6 @@ class DlshogiBatchProvider(TrainingDataProvider):
             batch_size,
             filtered,
             random_fen_skipping,
-            device,
         )
 
 
@@ -171,7 +168,6 @@ class DlshogiBatchDataset(torch.utils.data.IterableDataset):
         num_workers=1,
         filtered=False,
         random_fen_skipping=0,
-        device="cpu",
     ):
         super().__init__()
         self.filename = filename
@@ -180,7 +176,6 @@ class DlshogiBatchDataset(torch.utils.data.IterableDataset):
         self.num_workers = num_workers
         self.filtered = filtered
         self.random_fen_skipping = random_fen_skipping
-        self.device = device
 
     def __iter__(self):
         return DlshogiBatchProvider(
@@ -190,7 +185,6 @@ class DlshogiBatchDataset(torch.utils.data.IterableDataset):
             num_workers=self.num_workers,
             filtered=self.filtered,
             random_fen_skipping=self.random_fen_skipping,
-            device=self.device,
         )
 
 
