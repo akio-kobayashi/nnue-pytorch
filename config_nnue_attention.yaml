@@ -2,7 +2,7 @@ model:
   l1_size: 1024
   token_dim: 64
   attention_dim: 64
-  attention_heads: 4
+  attention_heads: 2
   attention_layers: 1
   attention_ff_mult: 2
   attention_dropout: 0.0
@@ -34,7 +34,7 @@ data:
   val: ../val.bin
   smart_fen_skipping: true
   random_fen_skipping: 10
-  batch_size: 512
+  batch_size: 128
   num_workers: 8
   val_num_workers: 1
   threads: 8
@@ -44,6 +44,7 @@ data:
 trainer:
   accelerator: gpu
   devices: 1
+  precision: 32-true
   gradient_clip_val: 1.0
   max_epochs: 100
   default_root_dir: ./nnue-models/data/attention/vanilla/

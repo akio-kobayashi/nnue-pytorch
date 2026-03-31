@@ -130,7 +130,7 @@ class NNUEAttention(pl.LightningModule):
         )
         for _ in range(attention_layers)
     ])
-    self.final_norm = nn.LayerNorm(attention_dim)
+    self.final_norm = nn.LayerNorm(attention_dim, eps=1e-5)
     self.head_hidden = nn.Linear(attention_dim, head_hidden_dim)
     self.output = nn.Linear(head_hidden_dim, 1)
 
@@ -227,7 +227,8 @@ class NNUEAttention(pl.LightningModule):
       tokens = block(tokens)
     if not torch.isfinite(tokens).all():
       raise RuntimeError("Non-finite values detected in attention output.")
-    pooled = self.final_norm(tokens[:, 0])
+    cls_token = torch.clamp(tokens[:, 0], -100.0, 100.0)
+    pooled = self.final_norm(cls_token.float()).to(dtype=tokens.dtype)
     if not torch.isfinite(pooled).all():
       raise RuntimeError("Non-finite values detected after attention pooling.")
     hidden = torch.clamp(self.head_hidden(pooled), 0.0, 1.0)
