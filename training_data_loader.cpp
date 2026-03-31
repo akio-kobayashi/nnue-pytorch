@@ -509,6 +509,16 @@ static void EnsureInitialize()
     initialized = true;
 
     USI::init(Options);
+    // The training data loader needs engine primitives, but not book loading or
+    // the runtime evaluation file. Suppress those side effects during startup.
+    if (Options.count("BookFile")) {
+        Options["BookFile"] = std::string("no_book");
+    }
+#if defined(EVAL_LEARN)
+    if (Options.count("SkipLoadingEval")) {
+        Options["SkipLoadingEval"] = true;
+    }
+#endif
     //Bitboards::init();
     //Position::init();
     //Search::init();

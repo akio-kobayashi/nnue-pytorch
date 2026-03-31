@@ -28,6 +28,7 @@ class NNUEAttention(pl.LightningModule):
       token_dim: int = 64, attention_dim: int = 128, attention_heads: int = 4,
       attention_layers: int = 2, attention_ff_mult: int = 4, attention_dropout: float = 0.1,
       head_hidden_dim: int = 128,
+      freeze_embedding: bool = True, input_lr_scale: float = 0.1, weight_decay: float = 0.01,
       ema_enabled: bool = False, ema_decay: float = 0.9995, ema_update_every: int = 1, ema_start_step: int = 1000,
       teacher_temperature: float = 1.0, entropy_coef: float = 1.0, outcome_pos_weight: float = 1.0,
       corn_aux_weight: float = 0.0, corn_aux_thresholds: list[float] | None = None):
@@ -74,6 +75,7 @@ class NNUEAttention(pl.LightningModule):
 
     self.lambda_ = lambda_
     self.lr = lr
+    self.weight_decay = float(weight_decay)
     self.label_smoothing_eps = label_smoothing_eps
     self.num_batches_warmup = num_batches_warmup
     self.score_scaling = score_scaling
@@ -92,12 +94,15 @@ class NNUEAttention(pl.LightningModule):
     self.entropy_coef = float(entropy_coef)
     self.outcome_pos_weight = max(float(outcome_pos_weight), self.EPSILON)
     self.corn_aux_weight = max(float(corn_aux_weight), 0.0)
+    self.freeze_embedding = bool(freeze_embedding)
+    self.input_lr_scale = float(input_lr_scale)
     if corn_aux_thresholds is None:
       corn_aux_thresholds = []
     self.corn_aux_thresholds = sorted(float(v) for v in corn_aux_thresholds)
 
     self._zero_virtual_feature_weights()
     self._init_attention_parameters()
+    self._set_embedding_trainable(not self.freeze_embedding)
 
   def _init_attention_parameters(self) -> None:
     nn.init.normal_(self.cls_token, mean=0.0, std=0.02)
@@ -115,6 +120,11 @@ class NNUEAttention(pl.LightningModule):
       for a, b in self.feature_set.get_virtual_feature_ranges():
         weights[:, a:b] = 0.0
     self.input.weight = nn.Parameter(weights)
+
+  def _set_embedding_trainable(self, trainable: bool) -> None:
+    self.input.weight.requires_grad = trainable
+    if self.input.bias is not None:
+      self.input.bias.requires_grad = trainable
 
   def set_feature_set(self, new_feature_set: Any) -> None:
     if self.feature_set.name == new_feature_set.name:
@@ -143,6 +153,8 @@ class NNUEAttention(pl.LightningModule):
 
   def _forward_hidden(self, us: Tensor, them: Tensor, w_in: Tensor, b_in: Tensor) -> Tensor:
     l0_ = self._nnue_embedding(us, them, w_in, b_in)
+    if not torch.isfinite(l0_).all():
+      raise RuntimeError("Non-finite values detected in NNUE embedding output.")
     tokens = l0_.reshape(l0_.shape[0], self.num_tokens, self.token_dim)
     tokens = self.token_proj(tokens)
     cls = self.cls_token.expand(tokens.shape[0], -1, -1)
@@ -151,6 +163,8 @@ class NNUEAttention(pl.LightningModule):
     tokens = self.attention(tokens)
     pooled = self.final_norm(tokens[:, 0])
     hidden = torch.clamp(self.head_hidden(pooled), 0.0, 1.0)
+    if not torch.isfinite(hidden).all():
+      raise RuntimeError("Non-finite values detected in NNUE attention hidden activations.")
     return hidden
 
   def forward(self, us: Tensor, them: Tensor, w_in: Tensor, b_in: Tensor) -> Tensor:
@@ -199,12 +213,20 @@ class NNUEAttention(pl.LightningModule):
     us, them, white, black, outcome, score, ply = self._unpack_batch(batch)
     hidden = self._forward_hidden(us, them, white, black)
     q = self.output(hidden) * self.NNUE_TO_SCORE / self.score_scaling
+    if not torch.isfinite(q).all():
+      raise RuntimeError("Non-finite values detected in NNUE attention logits.")
     teacher_entropy, outcome_entropy, teacher_loss, outcome_loss = self._compute_loss_terms(q, outcome, score)
     lambda_ = self._compute_lambda(ply)
     result = lambda_ * teacher_loss + (1.0 - lambda_) * outcome_loss
     entropy = lambda_ * teacher_entropy + (1.0 - lambda_) * outcome_entropy
     corn_aux_loss = self._compute_corn_aux_loss(q, score)
     loss = result.mean() - self.entropy_coef * entropy.mean() + self.corn_aux_weight * corn_aux_loss.mean()
+    if not torch.isfinite(loss):
+      raise RuntimeError(
+          "Non-finite loss detected. "
+          f"q_range=({q.min().item():.4f},{q.max().item():.4f}) "
+          f"score_range=({score.min().item():.4f},{score.max().item():.4f})"
+      )
     self.log(loss_type, loss, on_step=(loss_type == 'train_loss'), on_epoch=True, prog_bar=(loss_type != 'train_loss'))
     if self.corn_aux_weight > 0.0 and self.corn_aux_thresholds:
       self.log(f"{loss_type}_corn_aux", corn_aux_loss.mean(), on_step=False, on_epoch=True)
@@ -342,5 +364,25 @@ class NNUEAttention(pl.LightningModule):
 
   def configure_optimizers(self) -> Optimizer:
     if math.isclose(self.momentum, 0.0):
-      return torch.optim.AdamW(self.parameters(), lr=self.lr[0], betas=(0.9, 0.95))
+      if self.freeze_embedding:
+        return torch.optim.AdamW(
+            [param for param in self.parameters() if param.requires_grad],
+            lr=self.lr[0],
+            betas=(0.9, 0.95),
+            weight_decay=self.weight_decay,
+        )
+      base_lr = self.lr[0]
+      embedding_params = list(self.input.parameters())
+      other_params = [
+          param for name, param in self.named_parameters()
+          if param.requires_grad and not name.startswith("input.")
+      ]
+      return torch.optim.AdamW(
+          [
+              {"params": embedding_params, "lr": base_lr * self.input_lr_scale, "weight_decay": self.weight_decay},
+              {"params": other_params, "lr": base_lr, "weight_decay": self.weight_decay},
+          ],
+          lr=base_lr,
+          betas=(0.9, 0.95),
+      )
     return torch.optim.SGD(self.parameters(), lr=self.lr[0], momentum=self.momentum)

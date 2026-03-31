@@ -3,12 +3,15 @@ model:
   token_dim: 64
   attention_dim: 128
   attention_heads: 4
-  attention_layers: 2
+  attention_layers: 1
   attention_ff_mult: 4
   attention_dropout: 0.1
   head_hidden_dim: 128
+  freeze_embedding: true
+  input_lr_scale: 0.1
+  weight_decay: 0.01
   lambda_: [1.0]
-  lr: [0.0001]
+  lr: [0.00003]
   label_smoothing_eps: 0.0
   num_batches_warmup: 8000
   score_scaling: 361
@@ -31,7 +34,7 @@ data:
   val: ../val.bin
   smart_fen_skipping: true
   random_fen_skipping: 10
-  batch_size: 4096
+  batch_size: 2048
   num_workers: 8
   val_num_workers: 1
   threads: 8
