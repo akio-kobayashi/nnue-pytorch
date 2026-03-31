@@ -8,7 +8,7 @@ model:
   attention_dropout: 0.1
   head_hidden_dim: 128
   lambda_: [1.0]
-  lr: [0.0003]
+  lr: [0.0001]
   label_smoothing_eps: 0.0
   num_batches_warmup: 8000
   score_scaling: 361
@@ -31,7 +31,7 @@ data:
   val: ../val.bin
   smart_fen_skipping: true
   random_fen_skipping: 10
-  batch_size: 8192
+  batch_size: 4096
   num_workers: 8
   val_num_workers: 1
   threads: 8
@@ -41,6 +41,7 @@ data:
 trainer:
   accelerator: gpu
   devices: 1
+  gradient_clip_val: 1.0
   max_epochs: 100
   default_root_dir: /home/akio/nnue-models/data/dlshogi/vanilla/
   logger:

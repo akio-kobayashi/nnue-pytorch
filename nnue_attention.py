@@ -102,6 +102,12 @@ class NNUEAttention(pl.LightningModule):
   def _init_attention_parameters(self) -> None:
     nn.init.normal_(self.cls_token, mean=0.0, std=0.02)
     nn.init.normal_(self.pos_embedding, mean=0.0, std=0.02)
+    nn.init.xavier_uniform_(self.token_proj.weight, gain=0.5)
+    nn.init.zeros_(self.token_proj.bias)
+    nn.init.xavier_uniform_(self.head_hidden.weight, gain=0.5)
+    nn.init.zeros_(self.head_hidden.bias)
+    nn.init.normal_(self.output.weight, mean=0.0, std=1e-3)
+    nn.init.zeros_(self.output.bias)
 
   def _zero_virtual_feature_weights(self) -> None:
     weights = self.input.weight
@@ -144,7 +150,7 @@ class NNUEAttention(pl.LightningModule):
     tokens = tokens + self.pos_embedding
     tokens = self.attention(tokens)
     pooled = self.final_norm(tokens[:, 0])
-    hidden = F.gelu(self.head_hidden(pooled))
+    hidden = torch.clamp(self.head_hidden(pooled), 0.0, 1.0)
     return hidden
 
   def forward(self, us: Tensor, them: Tensor, w_in: Tensor, b_in: Tensor) -> Tensor:
@@ -338,4 +344,3 @@ class NNUEAttention(pl.LightningModule):
     if math.isclose(self.momentum, 0.0):
       return torch.optim.AdamW(self.parameters(), lr=self.lr[0], betas=(0.9, 0.95))
     return torch.optim.SGD(self.parameters(), lr=self.lr[0], momentum=self.momentum)
-
