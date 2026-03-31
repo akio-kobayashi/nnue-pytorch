@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Optional
 from torch import set_num_threads as t_set_num_threads
 from pytorch_lightning.cli import LightningCLI
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, IterableDataset
 
 
 DEFAULT_EPOCH_SIZE = 10_000_000
@@ -27,20 +27,22 @@ if hasattr(torch.backends, "cuda"):
         torch.backends.cuda.enable_math_sdp(True)
 
 
-class ResettableFixedNumBatchesDataset(torch.utils.data.Dataset):
+class ResettableFixedNumBatchesDataset(IterableDataset):
     def __init__(self, dataset, num_batches):
         super().__init__()
         self.dataset = dataset
-        self.iter = None
         self.num_batches = num_batches
 
     def __len__(self):
         return self.num_batches
 
-    def __getitem__(self, idx):
-        if idx == 0 or self.iter is None:
-            self.iter = iter(self.dataset)
-        return next(self.iter)
+    def __iter__(self):
+        iterator = iter(self.dataset)
+        for _ in range(self.num_batches):
+            try:
+                yield next(iterator)
+            except StopIteration:
+                return
 
 
 class NNUEAttentionDataModule(pl.LightningDataModule):
@@ -73,9 +75,9 @@ class NNUEAttentionDataModule(pl.LightningDataModule):
         if not Path(self.hparams.val).exists():
             raise FileNotFoundError(f"{self.hparams.val} does not exist")
 
+        # Let Lightning move batches to the accelerator. Keeping the C++ loader on
+        # CPU avoids validation-time device synchronization issues.
         main_device = "cpu"
-        if self.trainer and self.trainer.strategy.root_device.type == "cuda":
-            main_device = f"cuda:{self.trainer.strategy.root_device.index}"
 
         train_infinite = nnue_dataset.SparseBatchDataset(
             self.hparams.features,
@@ -107,10 +109,10 @@ class NNUEAttentionDataModule(pl.LightningDataModule):
         )
 
     def train_dataloader(self) -> DataLoader:
-        return DataLoader(self.train_ds, batch_size=None, batch_sampler=None)
+        return DataLoader(self.train_ds, batch_size=None)
 
     def val_dataloader(self) -> DataLoader:
-        return DataLoader(self.val_ds, batch_size=None, batch_sampler=None)
+        return DataLoader(self.val_ds, batch_size=None)
 
 
 class MyCLI(LightningCLI):

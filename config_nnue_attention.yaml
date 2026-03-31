@@ -39,7 +39,7 @@ data:
   val_num_workers: 1
   threads: 8
   epoch_size: 10000000
-  validation_size: 1000000
+  validation_size: 100000
 
 trainer:
   accelerator: gpu
@@ -47,6 +47,7 @@ trainer:
   precision: 32-true
   gradient_clip_val: 1.0
   max_epochs: 100
+  num_sanity_val_steps: 0
   default_root_dir: ./nnue-models/data/attention/vanilla/
   logger:
     class_path: pytorch_lightning.loggers.TensorBoardLogger
