@@ -31,6 +31,7 @@ data:
   random_fen_skipping: 10
   batch_size: 256
   num_workers: 8
+  val_num_workers: 1
   threads: 8
   epoch_size: 2000000
   validation_size: 200000

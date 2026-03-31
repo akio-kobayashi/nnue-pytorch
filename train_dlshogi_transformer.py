@@ -27,6 +27,7 @@ class DLShogiDataModule(pl.LightningDataModule):
         train: str,
         val: str,
         num_workers: int = 4,
+        val_num_workers: int = 1,
         batch_size: int = -1,
         smart_fen_skipping: bool = False,
         random_fen_skipping: int = 0,
@@ -58,9 +59,10 @@ class DLShogiDataModule(pl.LightningDataModule):
         val_infinite = dlshogi_dataset.DlshogiBatchDataset(
             self.hparams.val,
             self.hparams.batch_size,
-            num_workers=self.hparams.num_workers,
-            filtered=self.hparams.smart_fen_skipping,
-            random_fen_skipping=self.hparams.random_fen_skipping,
+            cyclic=False,
+            num_workers=self.hparams.val_num_workers,
+            filtered=False,
+            random_fen_skipping=0,
         )
         self.train_ds = dlshogi_dataset.FixedNumBatchesDataset(
             train_infinite,

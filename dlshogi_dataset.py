@@ -192,11 +192,13 @@ class FixedNumBatchesDataset(Dataset):
     def __init__(self, dataset, num_batches):
         super().__init__()
         self.dataset = dataset
-        self.iter = iter(self.dataset)
+        self.iter = None
         self.num_batches = num_batches
 
     def __len__(self):
         return self.num_batches
 
     def __getitem__(self, idx):
+        if idx == 0 or self.iter is None:
+            self.iter = iter(self.dataset)
         return next(self.iter)
