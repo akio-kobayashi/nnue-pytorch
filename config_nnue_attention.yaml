@@ -42,4 +42,10 @@ trainer:
   accelerator: gpu
   devices: 1
   max_epochs: 100
-
+  default_root_dir: /home/akio/nnue-models/data/dlshogi/vanilla/
+  logger:
+    class_path: pytorch_lightning.loggers.TensorBoardLogger
+    init_args:
+      save_dir: /home/akio/nnue_models/data/dlshogi/vanilla/runs/
+      name: vanilla
+      version: ""
