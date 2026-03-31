@@ -14,6 +14,68 @@ Batch = tuple[Tensor, ...]
 TensorDict = dict[str, Tensor]
 
 
+class SafeSelfAttention(nn.Module):
+  def __init__(self, dim: int, num_heads: int, dropout: float) -> None:
+    super().__init__()
+    if dim % num_heads != 0:
+      raise ValueError(f"dim ({dim}) must be divisible by num_heads ({num_heads}).")
+    self.dim = dim
+    self.num_heads = num_heads
+    self.head_dim = dim // num_heads
+    self.scale = self.head_dim ** -0.5
+    self.qkv = nn.Linear(dim, 3 * dim)
+    self.out_proj = nn.Linear(dim, dim)
+    self.dropout = float(dropout)
+
+    nn.init.xavier_uniform_(self.qkv.weight, gain=0.5)
+    nn.init.zeros_(self.qkv.bias)
+    nn.init.xavier_uniform_(self.out_proj.weight, gain=0.5)
+    nn.init.zeros_(self.out_proj.bias)
+
+  def forward(self, x: Tensor) -> Tensor:
+    batch_size, seq_len, _ = x.shape
+    qkv = self.qkv(x)
+    qkv = qkv.view(batch_size, seq_len, 3, self.num_heads, self.head_dim)
+    qkv = qkv.permute(2, 0, 3, 1, 4)
+    q, k, v = qkv[0], qkv[1], qkv[2]
+
+    scores = torch.matmul(q.float(), k.float().transpose(-2, -1)) * self.scale
+    scores = scores - scores.amax(dim=-1, keepdim=True)
+    attn = torch.softmax(scores, dim=-1)
+    attn = torch.nan_to_num(attn, nan=0.0, posinf=0.0, neginf=0.0)
+    if self.training and self.dropout > 0.0:
+      attn = F.dropout(attn, p=self.dropout)
+
+    out = torch.matmul(attn, v.float())
+    out = out.transpose(1, 2).contiguous().view(batch_size, seq_len, self.dim)
+    out = torch.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
+    return self.out_proj(out.to(dtype=x.dtype))
+
+
+class SafeAttentionBlock(nn.Module):
+  def __init__(self, dim: int, num_heads: int, ff_mult: int, dropout: float) -> None:
+    super().__init__()
+    self.norm1 = nn.LayerNorm(dim)
+    self.attn = SafeSelfAttention(dim, num_heads, dropout)
+    self.norm2 = nn.LayerNorm(dim)
+    ff_dim = dim * ff_mult
+    self.ffn = nn.Sequential(
+        nn.Linear(dim, ff_dim),
+        nn.GELU(),
+        nn.Dropout(dropout),
+        nn.Linear(ff_dim, dim),
+    )
+    nn.init.xavier_uniform_(self.ffn[0].weight, gain=0.5)
+    nn.init.zeros_(self.ffn[0].bias)
+    nn.init.xavier_uniform_(self.ffn[3].weight, gain=0.5)
+    nn.init.zeros_(self.ffn[3].bias)
+
+  def forward(self, x: Tensor) -> Tensor:
+    x = x + self.attn(self.norm1(x))
+    x = x + self.ffn(self.norm2(x))
+    return torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+
+
 class NNUEAttention(pl.LightningModule):
   """
   Uses the standard NNUE feature transformer as the embedding stage and replaces
@@ -59,16 +121,15 @@ class NNUEAttention(pl.LightningModule):
     self.token_proj = nn.Linear(token_dim, attention_dim)
     self.cls_token = nn.Parameter(torch.zeros(1, 1, attention_dim))
     self.pos_embedding = nn.Parameter(torch.zeros(1, self.num_tokens + 1, attention_dim))
-    encoder_layer = nn.TransformerEncoderLayer(
-        d_model=attention_dim,
-        nhead=attention_heads,
-        dim_feedforward=attention_dim * attention_ff_mult,
-        dropout=attention_dropout,
-        activation="gelu",
-        batch_first=True,
-        norm_first=True,
-    )
-    self.attention = nn.TransformerEncoder(encoder_layer, num_layers=attention_layers)
+    self.attention = nn.ModuleList([
+        SafeAttentionBlock(
+            dim=attention_dim,
+            num_heads=attention_heads,
+            ff_mult=attention_ff_mult,
+            dropout=attention_dropout,
+        )
+        for _ in range(attention_layers)
+    ])
     self.final_norm = nn.LayerNorm(attention_dim)
     self.head_hidden = nn.Linear(attention_dim, head_hidden_dim)
     self.output = nn.Linear(head_hidden_dim, 1)
@@ -162,7 +223,8 @@ class NNUEAttention(pl.LightningModule):
     cls = self.cls_token.expand(tokens.shape[0], -1, -1)
     tokens = torch.cat([cls, tokens], dim=1)
     tokens = tokens + self.pos_embedding
-    tokens = self.attention(tokens)
+    for block in self.attention:
+      tokens = block(tokens)
     if not torch.isfinite(tokens).all():
       raise RuntimeError("Non-finite values detected in attention output.")
     pooled = self.final_norm(tokens[:, 0])
