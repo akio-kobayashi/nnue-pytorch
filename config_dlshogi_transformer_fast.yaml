@@ -29,7 +29,7 @@ data:
   val: ../val.bin
   smart_fen_skipping: true
   random_fen_skipping: 10
-  batch_size: 512
+  batch_size: 256
   num_workers: 8
   threads: 8
   epoch_size: 1000000
@@ -38,7 +38,7 @@ data:
 trainer:
   accelerator: gpu
   devices: 1
-  precision: bf16-mixed
+  precision: 32-true
   gradient_clip_val: 0.5
   max_epochs: 50
   default_root_dir: ./runs/dlshogi_transformer/fast

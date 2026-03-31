@@ -309,7 +309,15 @@ class DLShogiTransformer(pl.LightningModule):
 
         for pg in optimizer.param_groups:
             pg["lr"] = self.lr[0] * warmup_scale
-            self.log("lr", pg["lr"])
+
+        if optimizer.param_groups:
+            self.log(
+                "lr",
+                float(optimizer.param_groups[0]["lr"]),
+                on_step=False,
+                on_epoch=True,
+                logger=True,
+            )
 
     def optimizer_step(
         self,
