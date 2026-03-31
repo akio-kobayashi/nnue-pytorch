@@ -195,6 +195,19 @@ python train.py --gpus 1 ...
 python train.py ... --features="HalfKP^"
 ```
 
+### NNUE embedding + Attention
+
+入力特徴量は NNUE のまま使い、feature transformer より上の層だけを attention 化したい場合は:
+
+```bash
+python train_nnue_attention.py fit \
+  --config config_nnue_attention.yaml \
+  --data.train /path/to/train.bin \
+  --data.val /path/to/val.bin
+```
+
+このモデルは `self.input` による NNUE embedding をそのまま使い、その後段を Transformer Encoder と scalar head に置き換えています。
+
 ## `shogi_ai` と組み合わせる場合
 
 `.bin` を `shogi_ai/wsl2/src/create_dataset.py` で作るなら、局面選別は `shogi_ai` 側を source of truth としてください。

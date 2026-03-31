@@ -1,0 +1,45 @@
+model:
+  l1_size: 1024
+  token_dim: 64
+  attention_dim: 128
+  attention_heads: 4
+  attention_layers: 2
+  attention_ff_mult: 4
+  attention_dropout: 0.1
+  head_hidden_dim: 128
+  lambda_: [1.0]
+  lr: [0.0003]
+  label_smoothing_eps: 0.0
+  num_batches_warmup: 8000
+  score_scaling: 361
+  momentum: 0.0
+  ema_enabled: false
+  ema_decay: 0.9995
+  ema_update_every: 1
+  ema_start_step: 1000
+  teacher_temperature: 1.0
+  entropy_coef: 1.0
+  outcome_pos_weight: 1.0
+  corn_aux_weight: 0.0
+  corn_aux_thresholds: []
+  ply_begin_threshold: 100.0
+  ply_end_threshold: 120.0
+
+data:
+  features: HalfKP^
+  train: ../train.bin
+  val: ../val.bin
+  smart_fen_skipping: true
+  random_fen_skipping: 10
+  batch_size: 8192
+  num_workers: 8
+  val_num_workers: 1
+  threads: 8
+  epoch_size: 10000000
+  validation_size: 1000000
+
+trainer:
+  accelerator: gpu
+  devices: 1
+  max_epochs: 100
+
