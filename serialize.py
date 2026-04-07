@@ -30,7 +30,7 @@ def ascii_hist(name, x, bins=6):
 # hardcoded for now
 VERSION = 0x7AF32F16
 YANE_LAYERSTACK_HASH_SEED = 0xB58B6A8D
-YANE_HALFKP_FRIEND_HASH = 0x5D69D5B9
+YANE_HALFKP_FRIEND_HASH = 0x5D69D5B8
 
 
 def _infer_features_from_input_dim(input_dim):
