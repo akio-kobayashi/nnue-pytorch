@@ -488,9 +488,12 @@ def main():
 
   print(f"Converting {args.source} to {args.target}")
 
+  def is_nnue_binary_path(path):
+    return path.endswith(".nnue") or path.endswith(".bin")
+
   if args.source.endswith(".pt") or args.source.endswith(".ckpt"):
-    if not args.target.endswith(".nnue"):
-      raise Exception("Target file must end with .nnue")
+    if not is_nnue_binary_path(args.target):
+      raise Exception("Target file must end with .nnue or .bin")
     if args.source.endswith(".pt"):
       nnue = torch.load(args.source)
     else:
@@ -517,7 +520,7 @@ def main():
     )
     with open(args.target, 'wb') as f:
       f.write(writer.buf)
-  elif args.source.endswith(".nnue"):
+  elif is_nnue_binary_path(args.source):
     if not args.target.endswith(".pt"):
       raise Exception("Target file must end with .pt")
     resolved_features, resolved_l1_size, resolved_l2_size, resolved_l3_size, resolved_num_buckets = resolve_model_args()
