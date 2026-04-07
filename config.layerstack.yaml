@@ -26,5 +26,13 @@ data:
   py_data: false
 
 trainer:
+  default_root_dir:
   accelerator: gpu
   devices: 1
+  logger:
+    class_path: pytorch_lightning.loggers.TensorBoardLogger
+    init_args:
+      save_dir:
+      name: vanilla
+      version: ""
+  max_epochs: 1000
