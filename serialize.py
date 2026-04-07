@@ -30,6 +30,7 @@ def ascii_hist(name, x, bins=6):
 # hardcoded for now
 VERSION = 0x7AF32F16
 YANE_LAYERSTACK_HASH_SEED = 0xB58B6A8D
+YANE_HALFKP_FRIEND_HASH = 0x5D69D5B9
 
 
 def _infer_features_from_input_dim(input_dim):
@@ -104,6 +105,18 @@ def _yaneuraou_network_hash(model):
   return hash_value & 0xFFFFFFFF
 
 
+def _yaneuraou_feature_name(feature_set_name):
+  if feature_set_name.startswith("HalfKP"):
+    return "HalfKP(Friend)"
+  return feature_set_name
+
+
+def _yaneuraou_feature_hash(feature_set):
+  if feature_set.name.startswith("HalfKP"):
+    return YANE_HALFKP_FRIEND_HASH
+  return feature_set.hash
+
+
 def _build_stockfish_description(model):
   l1_size = model.input.out_features
   l2_size = model.l2.in_features
@@ -136,7 +149,8 @@ def _build_yaneuraou_description(model):
   num_features = model.feature_set.num_features
   num_buckets = model.num_buckets if hasattr(model, 'num_buckets') else 1
 
-  description = f"Features={model.feature_set.name}[{num_features}->{l1_size}x2],".encode('ascii')
+  feature_name = _yaneuraou_feature_name(model.feature_set.name)
+  description = f"Features={feature_name}[{num_features}->{l1_size}x2],".encode('ascii')
   if num_buckets > 1:
     description += (
         f"Network=AffineTransform[1<-{l3_size}]"
@@ -231,7 +245,7 @@ class NNUEWriter():
   def feature_transformer_hash(self, model):
     if self.target_engine == 'yaneuraou':
       # YaneuraOu: RawFeatureHash ^ kOutputDimensions (kOutputDimensions = l1_size * 2)
-      return model.feature_set.hash ^ (model.input.out_features * 2)
+      return _yaneuraou_feature_hash(model.feature_set) ^ (model.input.out_features * 2)
     # Stockfish-style default used by this serializer previously
     return model.feature_set.hash ^ model.input.in_features
 
