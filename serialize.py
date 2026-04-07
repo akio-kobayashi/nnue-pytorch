@@ -32,6 +32,43 @@ VERSION = 0x7AF32F16
 YANE_LAYERSTACK_HASH_SEED = 0xB58B6A8D
 
 
+def _infer_features_from_input_dim(input_dim):
+  for feature_name in features.get_available_feature_blocks_names():
+    feature_set = features.get_feature_set_from_name(feature_name)
+    if feature_set.num_features == input_dim:
+      return feature_name
+  raise ValueError(f"Could not infer feature set from input dimension {input_dim}")
+
+
+def _infer_model_args_from_state_dict(state_dict):
+  layer_indices = sorted({
+      int(key.split(".")[2])
+      for key in state_dict
+      if key.startswith("l1.layers.") and key.endswith(".weight")
+  })
+
+  if layer_indices:
+    first_l1_key = f"l1.layers.{layer_indices[0]}.weight"
+    l2_size = int(state_dict[first_l1_key].shape[0])
+    num_buckets = len(layer_indices)
+  else:
+    l2_size = int(state_dict["l1.weight"].shape[0])
+    num_buckets = 1
+
+  return {
+      "features": _infer_features_from_input_dim(state_dict["input.weight"].shape[1]),
+      "l1_size": int(state_dict["input.weight"].shape[0]),
+      "l2_size": l2_size,
+      "l3_size": int(state_dict["l2.weight"].shape[0]),
+      "num_buckets": num_buckets,
+  }
+
+
+def _load_checkpoint_extras(model, checkpoint):
+  if hasattr(model, "on_load_checkpoint"):
+    model.on_load_checkpoint(checkpoint)
+
+
 def _affine_hash(prev_hash, out_features):
   hash_value = 0xCC03DAE4
   hash_value += out_features
@@ -423,16 +460,31 @@ def main():
   parser.add_argument("source", help="Source file (can be .ckpt, .pt or .nnue)")
   parser.add_argument("target", help="Target file (can be .pt or .nnue)")
   features.add_argparse_args(parser)
-  parser.add_argument("--l1_size", type=int, default=256)
-  parser.add_argument("--l2_size", type=int, default=32)
-  parser.add_argument("--l3_size", type=int, default=32)
-  parser.add_argument("--num_buckets", type=int, default=8)
+  parser.set_defaults(features=None)
+  parser.add_argument("--l1_size", type=int, default=None)
+  parser.add_argument("--l2_size", type=int, default=None)
+  parser.add_argument("--l3_size", type=int, default=None)
+  parser.add_argument("--num_buckets", type=int, default=None)
   parser.add_argument("--target-engine", choices=["stockfish", "yaneuraou"], default="stockfish")
   parser.add_argument("--yane-network-hash", type=lambda x: int(x, 0), default=None,
                       help="Used only when --target-engine yaneuraou.")
   args = parser.parse_args()
 
-  feature_set = features.get_feature_set_from_name(args.features)
+  default_features = "HalfKP"
+  default_l1_size = 256
+  default_l2_size = 32
+  default_l3_size = 32
+  default_num_buckets = 8
+
+  def resolve_model_args(hparams=None, inferred=None):
+    hparams = hparams or {}
+    inferred = inferred or {}
+    resolved_features = args.features if args.features is not None else hparams.get("features", inferred.get("features", default_features))
+    resolved_l1_size = args.l1_size if args.l1_size is not None else hparams.get("l1_size", inferred.get("l1_size", default_l1_size))
+    resolved_l2_size = args.l2_size if args.l2_size is not None else hparams.get("l2_size", inferred.get("l2_size", default_l2_size))
+    resolved_l3_size = args.l3_size if args.l3_size is not None else hparams.get("l3_size", inferred.get("l3_size", default_l3_size))
+    resolved_num_buckets = args.num_buckets if args.num_buckets is not None else hparams.get("num_buckets", inferred.get("num_buckets", default_num_buckets))
+    return resolved_features, resolved_l1_size, resolved_l2_size, resolved_l3_size, resolved_num_buckets
 
   print(f"Converting {args.source} to {args.target}")
 
@@ -442,7 +494,19 @@ def main():
     if args.source.endswith(".pt"):
       nnue = torch.load(args.source)
     else:
-      nnue = M.NNUE.load_from_checkpoint(args.source, features=args.features, l1_size=args.l1_size, l2_size=args.l2_size, l3_size=args.l3_size, num_buckets=args.num_buckets)
+      checkpoint = torch.load(args.source, map_location="cpu")
+      hyper_parameters = checkpoint.get("hyper_parameters", {})
+      inferred_args = _infer_model_args_from_state_dict(checkpoint["state_dict"])
+      resolved_features, resolved_l1_size, resolved_l2_size, resolved_l3_size, resolved_num_buckets = resolve_model_args(hyper_parameters, inferred_args)
+      nnue = M.NNUE(
+        features=resolved_features,
+        l1_size=resolved_l1_size,
+        l2_size=resolved_l2_size,
+        l3_size=resolved_l3_size,
+        num_buckets=resolved_num_buckets,
+      )
+      nnue.load_state_dict(checkpoint["state_dict"])
+      _load_checkpoint_extras(nnue, checkpoint)
     nnue.cpu()
     nnue.eval()
     writer = NNUEWriter(
@@ -456,14 +520,16 @@ def main():
   elif args.source.endswith(".nnue"):
     if not args.target.endswith(".pt"):
       raise Exception("Target file must end with .pt")
+    resolved_features, resolved_l1_size, resolved_l2_size, resolved_l3_size, resolved_num_buckets = resolve_model_args()
+    feature_set = features.get_feature_set_from_name(resolved_features)
     with open(args.source, 'rb') as f:
       reader = NNUEReader(
         f,
         feature_set,
-        l1_size=args.l1_size,
-        l2_size=args.l2_size,
-        l3_size=args.l3_size,
-        num_buckets=args.num_buckets,
+        l1_size=resolved_l1_size,
+        l2_size=resolved_l2_size,
+        l3_size=resolved_l3_size,
+        num_buckets=resolved_num_buckets,
         target_engine=args.target_engine,
         yane_network_hash=args.yane_network_hash,
       )
