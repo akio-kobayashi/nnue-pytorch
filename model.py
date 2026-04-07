@@ -2,23 +2,9 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 import pytorch_lightning as pl
-import sys
 from typing import Tuple, Callable, Iterator
 from torch.optim import Optimizer
 import features as features_module
-
-class SCReLU(nn.Module):
-    """
-    Squared Clipped ReLU (SCReLU) 活性化関数
-    
-    x = clamp(x, 0, 1)
-    y = x^2 * (255/256)
-    
-    将棋エンジンの整数演算（ビットシフト）との互換性を保つためのスケーリングを含みます。
-    """
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = torch.clamp(x, 0.0, 1.0)
-        return torch.pow(x, 2.0) * (255.0 / 256.0)
 
 class StackedLinear(nn.Module):
     """
@@ -69,9 +55,9 @@ class NNUE(pl.LightningModule):
       momentum: float = 0.0,
       ply_begin_threshold: float = 100.0,
       ply_end_threshold: float = 120.0,
-      l1_size: int = 1024,
-      l2_size: int = 8,
-      l3_size: int = 96,
+      l1_size: int = 256,
+      l2_size: int = 32,
+      l3_size: int = 32,
       num_buckets: int = 8
   ) -> None:
     super().__init__()
@@ -91,22 +77,10 @@ class NNUE(pl.LightningModule):
     self.feature_set = feature_set
     self.num_buckets = num_buckets
 
-    # 入力層 (Feature Transformer)
     self.input = nn.Linear(feature_set.num_features, l1_size)
-    
-    # LayerStack (Bucketed L1)
-    # 2 * l1_size は自軍と敵軍の入力を結合したサイズ
     self.l1 = StackedLinear(num_buckets, 2 * l1_size, l2_size)
-    
-    # 以降の隠れ層
     self.l2 = nn.Linear(l2_size, l3_size)
-    
-    # 出力層
     self.output = nn.Linear(l3_size, 1)
-    
-    # PSQT用パス (wpsqt - bpsqt)
-    # 特徴量から直接評価値に加算される線形層
-    self.psqt = nn.Linear(feature_set.num_features, 1, bias=False)
 
     self.lambda_ = lambda_
     self.lr = lr
@@ -121,7 +95,6 @@ class NNUE(pl.LightningModule):
     self.validation_step_outputs = []
 
     self._zero_virtual_feature_weights()
-    # 全てのバケットを初期状態で同じ重みにする
     self.l1.copy_weights_from_first_bucket()
 
   def _zero_virtual_feature_weights(self) -> None:
@@ -132,37 +105,17 @@ class NNUE(pl.LightningModule):
     self.input.weight = nn.Parameter(weights)
 
   def forward(self, us: torch.Tensor, them: torch.Tensor, w_in: torch.Tensor, b_in: torch.Tensor, ls_indices: torch.Tensor) -> torch.Tensor:
-    # Feature Transformer
     w_out = self.input(w_in)
     b_out = self.input(b_in)
 
-    # 視点に応じた特徴の結合
     l0_input = (us * torch.cat([w_out, b_out], dim=1)) + \
                (them * torch.cat([b_out, w_out], dim=1))
-    
-    # 第1層活性化: SCReLU
+
     l0_output = torch.clamp(l0_input, 0.0, 1.0)
-    l0_output = torch.pow(l0_output, 2.0) * (255.0 / 256.0)
-    
-    # Stacked L1
-    l1_output = self.l1(l0_output, ls_indices)
-    l1_output = torch.clamp(l1_output, 0.0, 1.0) # 中間層は通常のClipped ReLU
-    
-    # L2
+    l1_output = torch.clamp(self.l1(l0_output, ls_indices), 0.0, 1.0)
     l2_output = torch.clamp(self.l2(l1_output), 0.0, 1.0)
-    
-    # Main output
-    nnue_output = self.output(l2_output)
-    
-    # PSQT Path: (wpsqt - bpsqt)
-    # w_in, b_in は sparse tensor の場合があるが、ここでは dense 前提か 
-    # Datasetからは sparse で来るので、psqt.weight との行列演算が必要
-    # 簡易のため、w_in と b_in の差分に対して適用
-    w_psqt = F.linear(w_in, self.psqt.weight)
-    b_psqt = F.linear(b_in, self.psqt.weight)
-    psqt_output = (us * (w_psqt - b_psqt)) + (them * (b_psqt - w_psqt))
-    
-    return nnue_output + psqt_output
+
+    return self.output(l2_output)
 
   def step_(self, batch: Tuple, batch_idx: int, loss_type: str) -> torch.Tensor:
     if len(batch) == 8:
@@ -240,7 +193,7 @@ class NNUE(pl.LightningModule):
 
     for child in self.children():
       if isinstance(child, nn.Linear):
-          if child == self.input or child == self.psqt:
+          if child == self.input:
             continue
           
           if child != self.output:

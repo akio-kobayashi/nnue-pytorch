@@ -1,0 +1,30 @@
+model:
+  l1_size: 256
+  l2_size: 32
+  l3_size: 32
+  num_buckets: 8
+  lambda_: [1.0]
+  lr: [1.0]
+  label_smoothing_eps: 0.0
+  num_batches_warmup: 10000
+  gamma: 0.992
+  score_scaling: 361
+  momentum: 0.0
+  ply_begin_threshold: 100.0
+  ply_end_threshold: 120.0
+
+data:
+  features: HalfKP
+  train: ../train.bin
+  val: ../train.bin
+  smart_fen_skipping: true
+  random_fen_skipping: 10
+  batch_size: 16384
+  num_workers: 8
+  threads: 8
+  epoch_size: 10000000
+  py_data: false
+
+trainer:
+  accelerator: gpu
+  devices: 1

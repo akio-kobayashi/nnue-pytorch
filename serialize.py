@@ -29,6 +29,92 @@ def ascii_hist(name, x, bins=6):
 
 # hardcoded for now
 VERSION = 0x7AF32F16
+YANE_LAYERSTACK_HASH_SEED = 0xB58B6A8D
+
+
+def _affine_hash(prev_hash, out_features):
+  hash_value = 0xCC03DAE4
+  hash_value += out_features
+  hash_value ^= prev_hash >> 1
+  hash_value ^= (prev_hash << 31) & 0xFFFFFFFF
+  return hash_value & 0xFFFFFFFF
+
+
+def _clipped_relu_hash(prev_hash):
+  return (0x538D24C7 + prev_hash) & 0xFFFFFFFF
+
+
+def _input_slice_hash(output_dimensions, offset=0):
+  return (0xEC42E90D ^ output_dimensions ^ (offset << 10)) & 0xFFFFFFFF
+
+
+def _layer_stack_hash(prev_hash, num_buckets):
+  hash_value = YANE_LAYERSTACK_HASH_SEED
+  hash_value += num_buckets
+  hash_value ^= prev_hash >> 1
+  hash_value ^= (prev_hash << 31) & 0xFFFFFFFF
+  return hash_value & 0xFFFFFFFF
+
+
+def _yaneuraou_network_hash(model):
+  input_dims = model.input.out_features * 2
+  hidden1_dims = model.l1.layers[0].out_features if isinstance(model.l1, M.StackedLinear) else model.l1.out_features
+  hidden2_dims = model.l2.out_features
+
+  hash_value = _layer_stack_hash(_input_slice_hash(input_dims), getattr(model, 'num_buckets', 1))
+  hash_value = _affine_hash(_clipped_relu_hash(hash_value), hidden2_dims)
+  hash_value = _affine_hash(_clipped_relu_hash(hash_value), 1)
+  return hash_value & 0xFFFFFFFF
+
+
+def _build_stockfish_description(model):
+  l1_size = model.input.out_features
+  l2_size = model.l2.in_features
+  l3_size = model.l2.out_features
+  num_features = model.feature_set.num_features
+  num_buckets = model.num_buckets if hasattr(model, 'num_buckets') else 1
+
+  description = f"Features={model.feature_set.name}[{num_features}->{l1_size}x2],".encode('ascii')
+  if num_buckets > 1:
+    description += (
+        f"Network=AffineTransform[1<-{l3_size}]"
+        f"(ClippedReLU[{l3_size}](AffineTransform[{l3_size}<-{l2_size}]"
+        f"(ClippedReLU[{l2_size}](LayerStack[{num_buckets}x{l2_size}<-{l1_size * 2}]"
+        f"(InputSlice[{l1_size * 2}(0:{l1_size * 2})])))))"
+    ).encode('ascii')
+  else:
+    description += (
+        f"Network=AffineTransform[1<-{l3_size}]"
+        f"(ClippedReLU[{l3_size}](AffineTransform[{l3_size}<-{l2_size}]"
+        f"(ClippedReLU[{l2_size}](AffineTransform[{l2_size}<-{l1_size * 2}]"
+        f"(InputSlice[{l1_size * 2}(0:{l1_size * 2})])))))"
+    ).encode('ascii')
+  return description
+
+
+def _build_yaneuraou_description(model):
+  l1_size = model.input.out_features
+  l2_size = model.l2.in_features
+  l3_size = model.l2.out_features
+  num_features = model.feature_set.num_features
+  num_buckets = model.num_buckets if hasattr(model, 'num_buckets') else 1
+
+  description = f"Features={model.feature_set.name}[{num_features}->{l1_size}x2],".encode('ascii')
+  if num_buckets > 1:
+    description += (
+        f"Network=AffineTransform[1<-{l3_size}]"
+        f"(ClippedReLU[{l3_size}](AffineTransform[{l3_size}<-{l2_size}]"
+        f"(ClippedReLU[{l2_size}](LayerStack[{num_buckets}x{l2_size}<-{l1_size * 2}]"
+        f"(InputSlice[{l1_size * 2}(0:{l1_size * 2})])))))"
+    ).encode('ascii')
+  else:
+    description += (
+        f"Network=AffineTransform[1<-{l3_size}]"
+        f"(ClippedReLU[{l3_size}](AffineTransform[{l3_size}<-{l2_size}]"
+        f"(ClippedReLU[{l2_size}](AffineTransform[{l2_size}<-{l1_size * 2}]"
+        f"(InputSlice[{l1_size * 2}(0:{l1_size * 2})])))))"
+    ).encode('ascii')
+  return description
 
 if sys.version_info < (3, 10):
   raise RuntimeError(f"Python 3.10+ is required. Detected: {sys.version}")
@@ -37,7 +123,7 @@ class NNUEWriter():
   """
   All values are stored in little endian.
   """
-  def __init__(self, model, output_directory_path, target_engine='stockfish', yane_network_hash=VERSION):
+  def __init__(self, model, output_directory_path, target_engine='stockfish', yane_network_hash=None):
     self.output_directory_path = output_directory_path
     if not self.output_directory_path:
       self.output_directory_path = '.'
@@ -45,7 +131,7 @@ class NNUEWriter():
     self.figure_index = 0
     self.buf = bytearray()
     self.target_engine = target_engine
-    self.yane_network_hash = yane_network_hash
+    self.yane_network_hash = _yaneuraou_network_hash(model) if yane_network_hash is None else yane_network_hash
 
     fc_hash = self.fc_hash(model)
     self.write_header(model, fc_hash)
@@ -114,29 +200,16 @@ class NNUEWriter():
 
   def header_hash(self, model, fc_hash):
     if self.target_engine == 'yaneuraou':
-      # YaneuraOu kHashValue = FeatureTransformerHash ^ NetworkHash
       return self.feature_transformer_hash(model) ^ self.yane_network_hash
-    # Stockfish-style default used by this serializer previously
     return fc_hash ^ model.feature_set.hash ^ model.input.in_features
 
   def write_header(self, model, fc_hash):
     self.int32(VERSION) # version
     self.int32(self.header_hash(model, fc_hash)) # hash
-    
-    l1_size = model.input.out_features
-    l2_size = model.l2.in_features
-    l3_size = model.l2.out_features
-    num_features = model.feature_set.num_features
-    num_buckets = model.num_buckets if hasattr(model, 'num_buckets') else 1
-
-    description = f"Features={model.feature_set.name}[{num_features}->{l1_size}x2],".encode('ascii')
-    if num_buckets > 1:
-        description += f"Network=AffineTransform[1<-{l3_size}](ClippedReLU[{l3_size}](AffineTransform[{l3_size}<-{l2_size}]".encode('ascii')
-        description += f"(ClippedReLU[{l2_size}](LayerStack[{num_buckets}x{l2_size}<-{l1_size*2}](InputSlice[{l1_size*2}](0:{l1_size*2}))))))".encode('ascii')
+    if self.target_engine == 'yaneuraou':
+      description = _build_yaneuraou_description(model)
     else:
-        description += f"Network=AffineTransform[1<-{l3_size}](ClippedReLU[{l3_size}](AffineTransform[{l3_size}<-{l2_size}]".encode('ascii')
-        description += f"(ClippedReLU[{l2_size}](AffineTransform[{l2_size}<-{l1_size*2}](InputSlice[{l1_size*2}](0:{l1_size*2}))))))".encode('ascii')
-    
+      description = _build_stockfish_description(model)
     self.int32(len(description)) # Network definition
     self.buf.extend(description)
 
@@ -258,12 +331,12 @@ class NNUEWriter():
     self.buf.extend(struct.pack("<I", v))
 
 class NNUEReader():
-  def __init__(self, f, feature_set, l1_size=1024, l2_size=8, l3_size=96, num_buckets=8, target_engine='stockfish', yane_network_hash=VERSION):
+  def __init__(self, f, feature_set, l1_size=256, l2_size=32, l3_size=32, num_buckets=8, target_engine='stockfish', yane_network_hash=None):
     self.f = f
     self.feature_set = feature_set
     self.model = M.NNUE(feature_set.name, l1_size=l1_size, l2_size=l2_size, l3_size=l3_size, num_buckets=num_buckets)
     self.target_engine = target_engine
-    self.yane_network_hash = yane_network_hash
+    self.yane_network_hash = _yaneuraou_network_hash(self.model) if yane_network_hash is None else yane_network_hash
     fc_hash = NNUEWriter.fc_hash(self.model)
 
     self.read_header(feature_set, fc_hash)
@@ -350,13 +423,13 @@ def main():
   parser.add_argument("source", help="Source file (can be .ckpt, .pt or .nnue)")
   parser.add_argument("target", help="Target file (can be .pt or .nnue)")
   features.add_argparse_args(parser)
-  parser.add_argument("--l1_size", type=int, default=1024)
-  parser.add_argument("--l2_size", type=int, default=8)
-  parser.add_argument("--l3_size", type=int, default=96)
+  parser.add_argument("--l1_size", type=int, default=256)
+  parser.add_argument("--l2_size", type=int, default=32)
+  parser.add_argument("--l3_size", type=int, default=32)
   parser.add_argument("--num_buckets", type=int, default=8)
   parser.add_argument("--target-engine", choices=["stockfish", "yaneuraou"], default="stockfish")
-  parser.add_argument("--yane-network-hash", type=lambda x: int(x, 0), default=VERSION,
-                      help="Used only when --target-engine yaneuraou. Default is VERSION (0x7AF32F16).")
+  parser.add_argument("--yane-network-hash", type=lambda x: int(x, 0), default=None,
+                      help="Used only when --target-engine yaneuraou.")
   args = parser.parse_args()
 
   feature_set = features.get_feature_set_from_name(args.features)
