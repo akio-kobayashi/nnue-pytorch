@@ -71,7 +71,18 @@ def main():
     # It will also handle seeding and checkpointing.
     # All model/data/trainer arguments are now passed through the command line
     # with dot notation, e.g., --model.lambda_ 0.5 or --data.batch_size 8192
-    cli = MyCLI(M.NNUE, NNUEDataModule, save_config_callback=None, default_config_files=['config.yaml'])
+    config_files = []
+    for config_name in ("config.yaml", "config.layerstack.yaml"):
+        config_path = Path(config_name)
+        if config_path.exists() and config_path.stat().st_size > 0:
+            config_files.append(config_name)
+
+    cli = MyCLI(
+        M.NNUE,
+        NNUEDataModule,
+        save_config_callback=None,
+        parser_kwargs={"default_config_files": config_files},
+    )
 
 if __name__ == '__main__':
     main()
