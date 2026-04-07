@@ -72,10 +72,9 @@ def main():
     # All model/data/trainer arguments are now passed through the command line
     # with dot notation, e.g., --model.lambda_ 0.5 or --data.batch_size 8192
     config_files = []
-    for config_name in ("config.yaml", "config.layerstack.yaml"):
-        config_path = Path(config_name)
-        if config_path.exists() and config_path.stat().st_size > 0:
-            config_files.append(config_name)
+    config_path = Path("config.yaml")
+    if config_path.exists() and config_path.stat().st_size > 0:
+        config_files.append("config.yaml")
 
     cli = MyCLI(
         M.NNUE,
