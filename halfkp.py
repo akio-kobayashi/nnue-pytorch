@@ -1,4 +1,4 @@
-import chess
+import cshogi
 import torch
 import feature_block
 from collections import OrderedDict
@@ -9,47 +9,55 @@ NUM_SQ = 81
 NUM_PLANES = 1548
 
 def orient(is_white_pov: bool, sq: int):
-  return (63 * (not is_white_pov)) ^ sq
+  return sq if is_white_pov == cshogi.BLACK else 80 - sq
 
-def halfkp_idx(is_white_pov: bool, king_sq: int, sq: int, p: chess.Piece):
-  p_idx = (p.piece_type - 1) * 2 + (p.color != is_white_pov)
+def _piece_color(piece: int):
+  return cshogi.BLACK if piece < cshogi.WPAWN else cshogi.WHITE
+
+def halfkp_idx(is_white_pov: bool, king_sq: int, sq: int, piece: int):
+  piece_type = cshogi.piece_to_piece_type(piece)
+  p_idx = (piece_type - 1) * 2 + (_piece_color(piece) != is_white_pov)
   return 1 + orient(is_white_pov, sq) + p_idx * NUM_SQ + king_sq * NUM_PLANES
 
 class Features(FeatureBlock):
   def __init__(self):
     super(Features, self).__init__('HalfKP', 0x5d69d5b8, OrderedDict([('HalfKP', NUM_PLANES * NUM_SQ)]))
 
-  def get_active_features(self, board: chess.Board):
+  def get_active_features(self, board: cshogi.Board):
     def piece_features(turn):
       indices = torch.zeros(NUM_PLANES * NUM_SQ)
-      for sq, p in board.piece_map().items():
-        if p.piece_type == chess.KING:
+      king_sq = orient(turn, board.king_square(turn))
+      for sq, piece in enumerate(board.pieces):
+        if piece == cshogi.NONE:
           continue
-        indices[halfkp_idx(turn, orient(turn, board.king(turn)), sq, p)] = 1.0
+        if cshogi.piece_to_piece_type(piece) == cshogi.KING:
+          continue
+        indices[halfkp_idx(turn, king_sq, sq, piece)] = 1.0
       return indices
-    return (piece_features(chess.WHITE), piece_features(chess.BLACK))
+    return (piece_features(cshogi.BLACK), piece_features(cshogi.WHITE))
 
 class FactorizedFeatures(FeatureBlock):
   def __init__(self):
     super(FactorizedFeatures, self).__init__('HalfKP^', 0x5d69d5b8, OrderedDict([('HalfKP', NUM_PLANES * NUM_SQ), ('HalfK', NUM_SQ), ('P', NUM_PLANES )]))
     self.base = Features()
 
-  def get_active_features(self, board: chess.Board):
+  def get_active_features(self, board: cshogi.Board):
     white, black = self.base.get_active_features(board)
     def piece_features(base, color):
       indices = torch.zeros(NUM_SQ * 11)
       piece_count = 0
-      # P feature
-      for sq, p in board.piece_map().items():
-        if p.piece_type == chess.KING:
+      for sq, piece in enumerate(board.pieces):
+        if piece == cshogi.NONE:
+          continue
+        piece_type = cshogi.piece_to_piece_type(piece)
+        if piece_type == cshogi.KING:
           continue
         piece_count += 1
-        p_idx = (p.piece_type - 1) * 2 + (p.color != color)
+        p_idx = (piece_type - 1) * 2 + (_piece_color(piece) != color)
         indices[(p_idx + 1) * NUM_SQ + orient(color, sq)] = 1.0
-      # HalfK feature
-      indices[orient(color, board.king(color))] = piece_count
+      indices[orient(color, board.king_square(color))] = piece_count
       return torch.cat((base, indices))
-    return (piece_features(white, chess.WHITE), piece_features(black, chess.BLACK))
+    return (piece_features(white, cshogi.BLACK), piece_features(black, cshogi.WHITE))
 
   def get_feature_factors(self, idx):
     if idx >= self.num_real_features:

@@ -1,4 +1,4 @@
-import chess
+import cshogi
 import halfkp
 import mmap
 import random
@@ -8,49 +8,43 @@ import torch.nn.functional as F
 import numpy as np
 
 PACKED_SFEN_VALUE_BYTES = 40
-
-HUFFMAN_MAP = {0b000 : chess.PAWN, 0b001 : chess.KNIGHT, 0b010 : chess.BISHOP, 0b011 : chess.ROOK, 0b100: chess.QUEEN}
+PACKED_SFEN_VALUE_DTYPE = cshogi.PackedSfenValue
 
 PIECE_VALUES = {
-    chess.LANCE: 430,
-    chess.KNIGHT: 581,
-    chess.SILVER: 716,
-    chess.GOLD: 782,
-    chess.BISHOP: 1008,
-    chess.ROOK: 1193,
+    cshogi.LANCE: 430,
+    cshogi.KNIGHT: 581,
+    cshogi.SILVER: 716,
+    cshogi.GOLD: 782,
+    cshogi.BISHOP: 1008,
+    cshogi.ROOK: 1193,
 }
 
-def twos(v, w):
-  return v - int((v << 1) & 2**w)
-
-class BitReader():
-  def __init__(self, bytes, at):
-    self.bytes = bytes
-    self.seek(at)
-
-  def readBits(self, n):
-    r = self.bits & ((1 << n) - 1)
-    self.bits >>= n
-    self.position -= n
-    return r
-
-  def refill(self):
-    while self.position <= 24:
-      self.bits |= self.bytes[self.at] << self.position
-      self.position += 8
-      self.at += 1
-
-  def seek(self, at):
-    self.at = at
-    self.bits = 0
-    self.position = 0
-    self.refill()
+PROMOTED_TO_BASE = {
+    cshogi.PROM_LANCE: cshogi.LANCE,
+    cshogi.PROM_KNIGHT: cshogi.KNIGHT,
+    cshogi.PROM_SILVER: cshogi.SILVER,
+    cshogi.PROM_BISHOP: cshogi.BISHOP,
+    cshogi.PROM_ROOK: cshogi.ROOK,
+}
 
 def is_quiet(board, from_, to_):
   for mv in board.legal_moves:
-    if mv.from_square == from_ and mv.to_square == to_:
+    if cshogi.move_from(mv) == from_ and cshogi.move_to(mv) == to_:
       return not board.is_capture(mv)
   return False
+
+
+def _compute_npm(board):
+  npm = 0
+  for piece in board.pieces:
+    if piece == cshogi.NONE:
+      continue
+    piece_type = cshogi.piece_to_piece_type(piece)
+    if piece_type == cshogi.KING:
+      continue
+    base_type = PROMOTED_TO_BASE.get(piece_type, piece_type)
+    npm += PIECE_VALUES.get(base_type, 0)
+  return npm
 
 class ToTensor(object):
   def __init__(self, feature_set):
@@ -82,59 +76,36 @@ class NNUEBinData(torch.utils.data.Dataset):
     self.len = os.path.getsize(filename) // PACKED_SFEN_VALUE_BYTES
     self.transform = ToTensor(feature_set)
     self.file = None
+    self.records = None
 
   def __len__(self):
     return self.len
 
   def get_raw(self, idx):
     if self.file is None:
-      self.file = open(self.filename, 'r+b')
+      self.file = open(self.filename, 'rb')
       self.bytes = mmap.mmap(self.file.fileno(), 0)
+      self.records = np.frombuffer(self.bytes, dtype=PACKED_SFEN_VALUE_DTYPE)
 
-    base = PACKED_SFEN_VALUE_BYTES * idx
-    br = BitReader(self.bytes, base)
+    record = self.records[idx]
+    bd = cshogi.Board()
+    bd.set_psfen(np.asarray(record['sfen']))
 
-    bd = chess.Board(fen=None)
-    bd.turn = not br.readBits(1)
-    white_king_sq = br.readBits(6)
-    black_king_sq = br.readBits(6)
-    bd.set_piece_at(white_king_sq, chess.Piece(chess.KING, chess.WHITE))
-    bd.set_piece_at(black_king_sq, chess.Piece(chess.KING, chess.BLACK))
+    npm = _compute_npm(bd)
+    score = int(record['score'])
+    ply = int(record['gamePly'])
+    bd.move_number = max(1, (ply + 1) // 2)
+    move = bd.move_from_psv(int(record['move']))
 
-    assert(black_king_sq != white_king_sq)
-
-    npm = 0
-    for rank_ in range(8)[::-1]:
-      br.refill()
-      for file_ in range(8):
-        i = chess.square(file_, rank_)
-        if white_king_sq == i or black_king_sq == i:
-          continue
-        if br.readBits(1):
-          assert(bd.piece_at(i) == None)
-          piece_index = br.readBits(3)
-          piece = HUFFMAN_MAP[piece_index]
-          color = br.readBits(1)
-          bd.set_piece_at(i, chess.Piece(piece, not color))
-          if piece in PIECE_VALUES:
-            npm += PIECE_VALUES[piece]
-          br.refill()
-
-    br.seek(base + 32)
-    score = twos(br.readBits(16), 16)
-    move = br.readBits(16)
-    to_ = move & 63
-    from_ = (move & (63 << 6)) >> 6
-
-    br.refill()
-    ply = br.readBits(16)
-    bd.fullmove_number = ply // 2
-
-    move = chess.Move(from_square=chess.SQUARES[from_], to_square=chess.SQUARES[to_])
-
-    # 1, 0, -1
-    game_result = br.readBits(8)
-    outcome = {1: 1.0, 0: 0.5, 255: 0.0}[game_result]
+    game_result = int(record['game_result'])
+    if game_result == cshogi.DRAW:
+      outcome = 0.5
+    elif game_result == cshogi.BLACK_WIN:
+      outcome = 1.0 if bd.turn == cshogi.BLACK else 0.0
+    elif game_result == cshogi.WHITE_WIN:
+      outcome = 1.0 if bd.turn == cshogi.WHITE else 0.0
+    else:
+      raise ValueError(f'Unexpected game_result: {game_result}')
     return bd, move, outcome, score, ply, npm
 
 
@@ -146,5 +117,6 @@ class NNUEBinData(torch.utils.data.Dataset):
   def __getstate__(self):
     state = self.__dict__.copy()
     state['file'] = None
+    state['records'] = None
     state.pop('bytes', None)
     return state
