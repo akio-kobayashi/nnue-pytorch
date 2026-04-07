@@ -470,16 +470,16 @@ class NNUEReader():
     return v
 
 def main():
-  parser = argparse.ArgumentParser(description="Converts files between ckpt and nnue format.")
-  parser.add_argument("source", help="Source file (can be .ckpt, .pt or .nnue)")
-  parser.add_argument("target", help="Target file (can be .pt or .nnue)")
+  parser = argparse.ArgumentParser(description="Converts files between ckpt and nnue/bin format.")
+  parser.add_argument("source", help="Source file (can be .ckpt, .pt, .nnue or .bin)")
+  parser.add_argument("target", help="Target file (can be .pt, .nnue or .bin)")
   features.add_argparse_args(parser)
   parser.set_defaults(features=None)
   parser.add_argument("--l1_size", type=int, default=None)
   parser.add_argument("--l2_size", type=int, default=None)
   parser.add_argument("--l3_size", type=int, default=None)
   parser.add_argument("--num_buckets", type=int, default=None)
-  parser.add_argument("--target-engine", choices=["stockfish", "yaneuraou"], default="stockfish")
+  parser.add_argument("--target-engine", choices=["stockfish", "yaneuraou"], default=None)
   parser.add_argument("--yane-network-hash", type=lambda x: int(x, 0), default=None,
                       help="Used only when --target-engine yaneuraou.")
   args = parser.parse_args()
@@ -505,6 +505,15 @@ def main():
   def is_nnue_binary_path(path):
     return path.endswith(".nnue") or path.endswith(".bin")
 
+  def resolve_target_engine(source_path, target_path):
+    if args.target_engine is not None:
+      return args.target_engine
+    if target_path.endswith(".bin") or source_path.endswith(".bin"):
+      return "yaneuraou"
+    return "stockfish"
+
+  target_engine = resolve_target_engine(args.source, args.target)
+
   if args.source.endswith(".pt") or args.source.endswith(".ckpt"):
     if not is_nnue_binary_path(args.target):
       raise Exception("Target file must end with .nnue or .bin")
@@ -529,7 +538,7 @@ def main():
     writer = NNUEWriter(
       nnue,
       os.path.dirname(args.target),
-      target_engine=args.target_engine,
+      target_engine=target_engine,
       yane_network_hash=args.yane_network_hash,
     )
     with open(args.target, 'wb') as f:
@@ -547,7 +556,7 @@ def main():
         l2_size=resolved_l2_size,
         l3_size=resolved_l3_size,
         num_buckets=resolved_num_buckets,
-        target_engine=args.target_engine,
+        target_engine=target_engine,
         yane_network_hash=args.yane_network_hash,
       )
     torch.save(reader.model, args.target)
