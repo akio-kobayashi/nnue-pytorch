@@ -38,10 +38,52 @@ class StackedLinear(nn.Module):
                 self.layers[i].weight.copy_(first_layer.weight)
                 self.layers[i].bias.copy_(first_layer.bias)
 
+
+class MoELinear(nn.Module):
+    """
+    最初の 512->32 層だけを expert 化したシンプルな MoE
+    """
+    def __init__(self, num_experts: int, in_features: int, out_features: int):
+        super().__init__()
+        self.num_experts = num_experts
+        self.router = nn.Linear(in_features, num_experts)
+        self.experts = nn.ModuleList([nn.Linear(in_features, out_features) for _ in range(num_experts)])
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        logits = self.router(x)
+        probs = torch.softmax(logits, dim=1)
+        expert_outputs = torch.stack([expert(x) for expert in self.experts], dim=1)
+        output = torch.sum(probs.unsqueeze(-1) * expert_outputs, dim=1)
+        return output, probs
+
+    def forward_top1(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        logits = self.router(x)
+        expert_indices = logits.argmax(dim=1)
+        batch_size = x.shape[0]
+        out_features = self.experts[0].out_features
+        output = torch.zeros(batch_size, out_features, device=x.device, dtype=x.dtype)
+
+        for i in range(self.num_experts):
+            mask = expert_indices == i
+            if mask.any():
+                output[mask] = self.experts[i](x[mask])
+        return output, expert_indices
+
+    def copy_weights_from_first_expert(self):
+        first_expert = self.experts[0]
+        with torch.no_grad():
+            for i in range(1, self.num_experts):
+                self.experts[i].weight.copy_(first_expert.weight)
+                self.experts[i].bias.copy_(first_expert.bias)
+
+    def load_balancing_loss(self, route_probs: torch.Tensor) -> torch.Tensor:
+        importance = route_probs.mean(dim=0)
+        return self.num_experts * torch.sum(importance * importance) - 1.0
+
 class NNUE(pl.LightningModule):
   """
   将棋の局面評価のためのNNUE (Efficiently Updatable Neural Network) モデル
-  LayerStack (Bucketing) と SCReLU を搭載した進化版
+  最初の 512->32 層だけを expert 化した MoE 版
   """
   def __init__(
       self,
@@ -55,6 +97,7 @@ class NNUE(pl.LightningModule):
       momentum: float = 0.0,
       ply_begin_threshold: float = 100.0,
       ply_end_threshold: float = 120.0,
+      moe_aux_loss_weight: float = 0.01,
       l1_size: int = 256,
       l2_size: int = 32,
       l3_size: int = 32,
@@ -78,7 +121,7 @@ class NNUE(pl.LightningModule):
     self.num_buckets = num_buckets
 
     self.input = nn.Linear(feature_set.num_features, l1_size)
-    self.l1 = StackedLinear(num_buckets, 2 * l1_size, l2_size)
+    self.l1 = MoELinear(num_buckets, 2 * l1_size, l2_size)
     self.l2 = nn.Linear(l2_size, l3_size)
     self.output = nn.Linear(l3_size, 1)
 
@@ -92,10 +135,11 @@ class NNUE(pl.LightningModule):
     self.momentum = momentum
     self.ply_begin_threshold = ply_begin_threshold
     self.ply_end_threshold = ply_end_threshold
+    self.moe_aux_loss_weight = moe_aux_loss_weight
     self.validation_step_outputs = []
 
     self._zero_virtual_feature_weights()
-    self.l1.copy_weights_from_first_bucket()
+    self.l1.copy_weights_from_first_expert()
 
   def _zero_virtual_feature_weights(self) -> None:
     weights = self.input.weight
@@ -104,7 +148,15 @@ class NNUE(pl.LightningModule):
         weights[:, a:b] = 0.0
     self.input.weight = nn.Parameter(weights)
 
-  def forward(self, us: torch.Tensor, them: torch.Tensor, w_in: torch.Tensor, b_in: torch.Tensor, ls_indices: torch.Tensor) -> torch.Tensor:
+  def forward(
+      self,
+      us: torch.Tensor,
+      them: torch.Tensor,
+      w_in: torch.Tensor,
+      b_in: torch.Tensor,
+      use_top1: bool = False,
+      return_aux: bool = False,
+  ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     w_out = self.input(w_in)
     b_out = self.input(b_in)
 
@@ -112,10 +164,19 @@ class NNUE(pl.LightningModule):
                (them * torch.cat([b_out, w_out], dim=1))
 
     l0_output = torch.clamp(l0_input, 0.0, 1.0)
-    l1_output = torch.clamp(self.l1(l0_output, ls_indices), 0.0, 1.0)
-    l2_output = torch.clamp(self.l2(l1_output), 0.0, 1.0)
+    if use_top1:
+      l1_preact, _expert_indices = self.l1.forward_top1(l0_output)
+      moe_aux_loss = l0_output.new_zeros(())
+    else:
+      l1_preact, route_probs = self.l1(l0_output)
+      moe_aux_loss = self.l1.load_balancing_loss(route_probs)
 
-    return self.output(l2_output)
+    l1_output = torch.clamp(l1_preact, 0.0, 1.0)
+    l2_output = torch.clamp(self.l2(l1_output), 0.0, 1.0)
+    output = self.output(l2_output)
+    if return_aux:
+      return output, moe_aux_loss
+    return output
 
   def step_(self, batch: Tuple, batch_idx: int, loss_type: str) -> torch.Tensor:
     if len(batch) == 8:
@@ -126,11 +187,7 @@ class NNUE(pl.LightningModule):
     else:
       raise ValueError(f'Unexpected batch format (len={len(batch)}). Expected 7 or 8 tensors.')
 
-    # バケットインデックスの計算 (NPMに基づく num_buckets 分割)
-    # bucket_index = (16384 - total_non_pawn_material) * num_buckets / 16384
-    ls_indices = torch.clamp((16384.0 - npm) * float(self.num_buckets) / 16384.0, 0, self.num_buckets - 1).long()
-
-    model_raw_output = self(us_indices, them_indices, white_features, black_features, ls_indices)
+    model_raw_output, moe_aux_loss = self(us_indices, them_indices, white_features, black_features, return_aux=True)
     scaled_model_output = model_raw_output * self.NNUE_TO_SCORE_CONSTANT / self.score_scaling
 
     smoothed_outcome_prob = game_outcome * (1.0 - self.label_smoothing_eps * 2.0) + self.label_smoothing_eps
@@ -159,7 +216,9 @@ class NNUE(pl.LightningModule):
     combined_entropy_result = current_lambda * teacher_entropy + (1.0 - current_lambda) * outcome_entropy
     
     final_loss = combined_loss_result.mean() - combined_entropy_result.mean()
+    final_loss = final_loss + self.moe_aux_loss_weight * moe_aux_loss
     self.log(loss_type, final_loss)
+    self.log(f'{loss_type}_moe_aux', moe_aux_loss)
     return final_loss
 
   def training_step(self, batch: Tuple, batch_idx: int) -> torch.Tensor:
@@ -191,27 +250,20 @@ class NNUE(pl.LightningModule):
 
     optimizer.step(closure=optimizer_closure)
 
-    for child in self.children():
-      if isinstance(child, nn.Linear):
-          if child == self.input:
-            continue
-          
-          if child != self.output:
-            bias_scale = (1 << self.WEIGHT_CLIP_BITS) * self.ACTIVATION_SCALE
-          else:
-            bias_scale = self.NNUE_TO_SCORE_CONSTANT * self.FV_SCALE
-          
-          weight_scale = bias_scale / self.ACTIVATION_SCALE
-          max_weight_value = self.ACTIVATION_SCALE / weight_scale
-          child.weight.data.clamp_(-max_weight_value, max_weight_value)
-      
-      elif isinstance(child, StackedLinear):
-          # StackedLinear の各バケットに対しても同様にクリッピング
-          bias_scale = (1 << self.WEIGHT_CLIP_BITS) * self.ACTIVATION_SCALE
-          weight_scale = bias_scale / self.ACTIVATION_SCALE
-          max_weight_value = self.ACTIVATION_SCALE / weight_scale
-          for layer in child.layers:
-              layer.weight.data.clamp_(-max_weight_value, max_weight_value)
+    for module in self.modules():
+      if not isinstance(module, nn.Linear):
+        continue
+      if module == self.input:
+        continue
+
+      if module == self.output:
+        bias_scale = self.NNUE_TO_SCORE_CONSTANT * self.FV_SCALE
+      else:
+        bias_scale = (1 << self.WEIGHT_CLIP_BITS) * self.ACTIVATION_SCALE
+
+      weight_scale = bias_scale / self.ACTIVATION_SCALE
+      max_weight_value = self.ACTIVATION_SCALE / weight_scale
+      module.weight.data.clamp_(-max_weight_value, max_weight_value)
 
   def configure_optimizers(self) -> Tuple[list[Optimizer], list[object]]:
     optimizer = torch.optim.SGD(self.parameters(), lr=self.lr[0], momentum=self.momentum)
@@ -221,7 +273,7 @@ class NNUE(pl.LightningModule):
   def get_layers(self, filt: Callable[[nn.Module], bool]) -> Iterator[nn.Parameter]:
     for module in self.children():
       if filt(module):
-        if isinstance(module, (nn.Linear, StackedLinear)):
+        if isinstance(module, (nn.Linear, StackedLinear, MoELinear)):
           for param in module.parameters():
             if param.requires_grad:
               yield param

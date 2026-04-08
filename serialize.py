@@ -31,6 +31,7 @@ def ascii_hist(name, x, bins=6):
 VERSION = 0x7AF32F16
 YANE_LAYERSTACK_HASH_SEED = 0xB58B6A8D
 YANE_HALFKP_FRIEND_HASH = 0x5D69D5B8
+YANE_MOE_HASH_SEED = 0x94A3EDE7
 
 
 def _infer_features_from_input_dim(input_dim):
@@ -94,12 +95,30 @@ def _layer_stack_hash(prev_hash, num_buckets):
   return hash_value & 0xFFFFFFFF
 
 
+def _moe_hash(prev_hash, num_experts, out_features):
+  hash_value = YANE_MOE_HASH_SEED
+  hash_value += num_experts
+  hash_value ^= prev_hash >> 1
+  hash_value ^= (prev_hash << 31) & 0xFFFFFFFF
+  hash_value = _affine_hash(hash_value & 0xFFFFFFFF, out_features)
+  return hash_value & 0xFFFFFFFF
+
+
 def _yaneuraou_network_hash(model):
   input_dims = model.input.out_features * 2
-  hidden1_dims = model.l1.layers[0].out_features if isinstance(model.l1, M.StackedLinear) else model.l1.out_features
+  if isinstance(model.l1, M.MoELinear):
+    hidden1_dims = model.l1.experts[0].out_features
+  elif isinstance(model.l1, M.StackedLinear):
+    hidden1_dims = model.l1.layers[0].out_features
+  else:
+    hidden1_dims = model.l1.out_features
   hidden2_dims = model.l2.out_features
 
-  hash_value = _layer_stack_hash(_input_slice_hash(input_dims), getattr(model, 'num_buckets', 1))
+  if isinstance(model.l1, M.MoELinear):
+    hash_value = _affine_hash(_input_slice_hash(input_dims), model.l1.num_experts)
+    hash_value = _moe_hash(hash_value, model.l1.num_experts, hidden1_dims)
+  else:
+    hash_value = _layer_stack_hash(_input_slice_hash(input_dims), getattr(model, 'num_buckets', 1))
   hash_value = _affine_hash(_clipped_relu_hash(hash_value), hidden2_dims)
   hash_value = _affine_hash(_clipped_relu_hash(hash_value), 1)
   return hash_value & 0xFFFFFFFF
@@ -125,7 +144,14 @@ def _build_stockfish_description(model):
   num_buckets = model.num_buckets if hasattr(model, 'num_buckets') else 1
 
   description = f"Features={model.feature_set.name}[{num_features}->{l1_size}x2],".encode('ascii')
-  if num_buckets > 1:
+  if isinstance(model.l1, M.MoELinear):
+    description += (
+        f"Network=AffineTransform[1<-{l3_size}]"
+        f"(ClippedReLU[{l3_size}](AffineTransform[{l3_size}<-{l2_size}]"
+        f"(ClippedReLU[{l2_size}](MoE[{num_buckets}x{l2_size}<-{l1_size * 2}]"
+        f"(AffineTransform[{num_buckets}<-{l1_size * 2}](InputSlice[{l1_size * 2}(0:{l1_size * 2})]))))))"
+    ).encode('ascii')
+  elif num_buckets > 1:
     description += (
         f"Network=AffineTransform[1<-{l3_size}]"
         f"(ClippedReLU[{l3_size}](AffineTransform[{l3_size}<-{l2_size}]"
@@ -151,7 +177,14 @@ def _build_yaneuraou_description(model):
 
   feature_name = _yaneuraou_feature_name(model.feature_set.name)
   description = f"Features={feature_name}[{num_features}->{l1_size}x2],".encode('ascii')
-  if num_buckets > 1:
+  if isinstance(model.l1, M.MoELinear):
+    description += (
+        f"Network=AffineTransform[1<-{l3_size}]"
+        f"(ClippedReLU[{l3_size}](AffineTransform[{l3_size}<-{l2_size}]"
+        f"(ClippedReLU[{l2_size}](MoE[{num_buckets}x{l2_size}<-{l1_size * 2}]"
+        f"(AffineTransform[{num_buckets}<-{l1_size * 2}](InputSlice[{l1_size * 2}(0:{l1_size * 2})]))))))"
+    ).encode('ascii')
+  elif num_buckets > 1:
     description += (
         f"Network=AffineTransform[1<-{l3_size}]"
         f"(ClippedReLU[{l3_size}](AffineTransform[{l3_size}<-{l2_size}]"
@@ -190,8 +223,11 @@ class NNUEWriter():
     self.write_feature_transformer(model)
     self.int32(fc_hash) # FC layers hash
     
-    # LayerStack (StackedLinear) serialization
-    if isinstance(model.l1, M.StackedLinear):
+    if isinstance(model.l1, M.MoELinear):
+        self.write_fc_layer(model.l1.router)
+        for expert in model.l1.experts:
+            self.write_fc_layer(expert)
+    elif isinstance(model.l1, M.StackedLinear):
         for i in range(model.num_buckets):
             layer = model.l1.layers[i]
             # Bias
@@ -221,6 +257,9 @@ class NNUEWriter():
 
   @staticmethod
   def fc_hash(model):
+    if isinstance(model.l1, M.MoELinear):
+      return _yaneuraou_network_hash(model)
+
     # InputSlice hash
     prev_hash = 0xEC42E90D
     l1_first = model.l1.layers[0] if isinstance(model.l1, M.StackedLinear) else model.l1
@@ -395,7 +434,11 @@ class NNUEReader():
     self.read_feature_transformer(self.model.input)
     self.read_int32(fc_hash) # FC layers hash
     
-    if isinstance(self.model.l1, M.StackedLinear):
+    if isinstance(self.model.l1, M.MoELinear):
+        self.read_fc_layer(self.model.l1.router)
+        for expert in self.model.l1.experts:
+            self.read_fc_layer(expert)
+    elif isinstance(self.model.l1, M.StackedLinear):
         for i in range(self.model.num_buckets):
             layer = self.model.l1.layers[i]
             # Bias (int32)
@@ -417,7 +460,7 @@ class NNUEReader():
 
   def feature_transformer_hash(self):
     if self.target_engine == 'yaneuraou':
-      return self.feature_set.hash ^ (self.model.input.out_features * 2)
+      return _yaneuraou_feature_hash(self.feature_set) ^ (self.model.input.out_features * 2)
     return self.feature_set.hash ^ self.model.input.in_features
 
   def expected_header_hash(self, fc_hash):
