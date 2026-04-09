@@ -43,27 +43,57 @@ def _infer_features_from_input_dim(input_dim):
 
 
 def _infer_model_args_from_state_dict(state_dict):
-  layer_indices = sorted({
-      int(key.split(".")[2])
-      for key in state_dict
-      if key.startswith("l1.layers.") and key.endswith(".weight")
-  })
-
-  if layer_indices:
-    first_l1_key = f"l1.layers.{layer_indices[0]}.weight"
-    l2_size = int(state_dict[first_l1_key].shape[0])
-    num_buckets = len(layer_indices)
+  if any(key.startswith("l1.router.") for key in state_dict):
+    expert_indices = sorted({
+        int(key.split(".")[2])
+        for key in state_dict
+        if key.startswith("l1.experts.") and key.endswith(".weight")
+    })
+    first_expert_key = f"l1.experts.{expert_indices[0]}.weight"
+    l2_size = int(state_dict[first_expert_key].shape[0])
+    num_buckets = len(expert_indices)
+    l1_mode = "moe"
   else:
-    l2_size = int(state_dict["l1.weight"].shape[0])
-    num_buckets = 1
+    layer_indices = sorted({
+        int(key.split(".")[2])
+        for key in state_dict
+        if key.startswith("l1.layers.") and key.endswith(".weight")
+    })
+
+    if layer_indices:
+      first_l1_key = f"l1.layers.{layer_indices[0]}.weight"
+      l2_size = int(state_dict[first_l1_key].shape[0])
+      num_buckets = len(layer_indices)
+      l1_mode = "layerstack"
+    else:
+      l2_size = int(state_dict["l1.weight"].shape[0])
+      num_buckets = 1
+      l1_mode = "dense"
 
   return {
       "features": _infer_features_from_input_dim(state_dict["input.weight"].shape[1]),
+      "l1_mode": l1_mode,
       "l1_size": int(state_dict["input.weight"].shape[0]),
       "l2_size": l2_size,
       "l3_size": int(state_dict["l2.weight"].shape[0]),
       "num_buckets": num_buckets,
   }
+
+
+def _infer_l1_mode_from_description(description: bytes) -> str:
+  if b"MoE[" in description:
+    return "moe"
+  if b"LayerStack[" in description:
+    return "layerstack"
+  return "dense"
+
+
+def _peek_binary_description(path: str) -> bytes:
+  with open(path, "rb") as f:
+    f.read(4)  # version
+    f.read(4)  # hash
+    desc_len = struct.unpack("<I", f.read(4))[0]
+    return f.read(desc_len)
 
 
 def _load_checkpoint_extras(model, checkpoint):
@@ -421,10 +451,10 @@ class NNUEWriter():
     self.buf.extend(struct.pack("<I", v))
 
 class NNUEReader():
-  def __init__(self, f, feature_set, l1_size=256, l2_size=32, l3_size=32, num_buckets=8, target_engine='stockfish', yane_network_hash=None):
+  def __init__(self, f, feature_set, l1_mode="dense", l1_size=256, l2_size=32, l3_size=32, num_buckets=8, target_engine='stockfish', yane_network_hash=None):
     self.f = f
     self.feature_set = feature_set
-    self.model = M.NNUE(feature_set.name, l1_size=l1_size, l2_size=l2_size, l3_size=l3_size, num_buckets=num_buckets)
+    self.model = M.NNUE(feature_set.name, l1_mode=l1_mode, l1_size=l1_size, l2_size=l2_size, l3_size=l3_size, num_buckets=num_buckets)
     self.target_engine = target_engine
     self.yane_network_hash = _yaneuraou_network_hash(self.model) if yane_network_hash is None else yane_network_hash
     fc_hash = NNUEWriter.fc_hash(self.model)
@@ -537,11 +567,12 @@ def main():
     hparams = hparams or {}
     inferred = inferred or {}
     resolved_features = args.features if args.features is not None else hparams.get("features", inferred.get("features", default_features))
+    resolved_l1_mode = hparams.get("l1_mode", inferred.get("l1_mode", "dense"))
     resolved_l1_size = args.l1_size if args.l1_size is not None else hparams.get("l1_size", inferred.get("l1_size", default_l1_size))
     resolved_l2_size = args.l2_size if args.l2_size is not None else hparams.get("l2_size", inferred.get("l2_size", default_l2_size))
     resolved_l3_size = args.l3_size if args.l3_size is not None else hparams.get("l3_size", inferred.get("l3_size", default_l3_size))
     resolved_num_buckets = args.num_buckets if args.num_buckets is not None else hparams.get("num_buckets", inferred.get("num_buckets", default_num_buckets))
-    return resolved_features, resolved_l1_size, resolved_l2_size, resolved_l3_size, resolved_num_buckets
+    return resolved_features, resolved_l1_mode, resolved_l1_size, resolved_l2_size, resolved_l3_size, resolved_num_buckets
 
   print(f"Converting {args.source} to {args.target}")
 
@@ -566,9 +597,10 @@ def main():
       checkpoint = torch.load(args.source, map_location="cpu")
       hyper_parameters = checkpoint.get("hyper_parameters", {})
       inferred_args = _infer_model_args_from_state_dict(checkpoint["state_dict"])
-      resolved_features, resolved_l1_size, resolved_l2_size, resolved_l3_size, resolved_num_buckets = resolve_model_args(hyper_parameters, inferred_args)
+      resolved_features, resolved_l1_mode, resolved_l1_size, resolved_l2_size, resolved_l3_size, resolved_num_buckets = resolve_model_args(hyper_parameters, inferred_args)
       nnue = M.NNUE(
         features=resolved_features,
+        l1_mode=resolved_l1_mode,
         l1_size=resolved_l1_size,
         l2_size=resolved_l2_size,
         l3_size=resolved_l3_size,
@@ -589,12 +621,14 @@ def main():
   elif is_nnue_binary_path(args.source):
     if not args.target.endswith(".pt"):
       raise Exception("Target file must end with .pt")
-    resolved_features, resolved_l1_size, resolved_l2_size, resolved_l3_size, resolved_num_buckets = resolve_model_args()
+    inferred_args = {"l1_mode": _infer_l1_mode_from_description(_peek_binary_description(args.source))}
+    resolved_features, resolved_l1_mode, resolved_l1_size, resolved_l2_size, resolved_l3_size, resolved_num_buckets = resolve_model_args(inferred=inferred_args)
     feature_set = features.get_feature_set_from_name(resolved_features)
     with open(args.source, 'rb') as f:
       reader = NNUEReader(
         f,
         feature_set,
+        l1_mode=resolved_l1_mode,
         l1_size=resolved_l1_size,
         l2_size=resolved_l2_size,
         l3_size=resolved_l3_size,

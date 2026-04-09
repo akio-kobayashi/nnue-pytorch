@@ -1,4 +1,5 @@
 model:
+  l1_mode: layerstack
   l1_size: 256
   l2_size: 32
   l3_size: 32

@@ -60,7 +60,7 @@ class NNUEDataModule(pl.LightningDataModule):
 class MyCLI(LightningCLI):
     def add_arguments_to_parser(self, parser):
         parser.add_argument("--gamma", type=float, default=0.992, help="各エポック後に学習率に乗じる乗法的係数")
-        parser.add_argument("--num_buckets", type=int, default=8, help="LayerStackのバケット数")
+        parser.add_argument("--num_buckets", type=int, default=8, help="LayerStack / MoE の expert 数")
         parser.link_arguments("gamma", "model.gamma")
         parser.link_arguments("num_buckets", "model.num_buckets")
         parser.link_arguments("data.features", "model.features")

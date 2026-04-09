@@ -83,7 +83,7 @@ class MoELinear(nn.Module):
 class NNUE(pl.LightningModule):
   """
   将棋の局面評価のためのNNUE (Efficiently Updatable Neural Network) モデル
-  最初の 512->32 層だけを expert 化した MoE 版
+  先頭 512->32 層を dense / LayerStack / MoE で切り替え可能な版
   """
   def __init__(
       self,
@@ -98,6 +98,7 @@ class NNUE(pl.LightningModule):
       ply_begin_threshold: float = 100.0,
       ply_end_threshold: float = 120.0,
       moe_aux_loss_weight: float = 0.01,
+      l1_mode: str = "moe",
       l1_size: int = 256,
       l2_size: int = 32,
       l3_size: int = 32,
@@ -119,9 +120,17 @@ class NNUE(pl.LightningModule):
     feature_set = features_module.get_feature_set_from_name(features)
     self.feature_set = feature_set
     self.num_buckets = num_buckets
+    self.l1_mode = l1_mode
 
     self.input = nn.Linear(feature_set.num_features, l1_size)
-    self.l1 = MoELinear(num_buckets, 2 * l1_size, l2_size)
+    if l1_mode == "moe":
+      self.l1 = MoELinear(num_buckets, 2 * l1_size, l2_size)
+    elif l1_mode == "layerstack":
+      self.l1 = StackedLinear(num_buckets, 2 * l1_size, l2_size)
+    elif l1_mode == "dense":
+      self.l1 = nn.Linear(2 * l1_size, l2_size)
+    else:
+      raise ValueError(f"Unsupported l1_mode: {l1_mode}")
     self.l2 = nn.Linear(l2_size, l3_size)
     self.output = nn.Linear(l3_size, 1)
 
@@ -139,7 +148,10 @@ class NNUE(pl.LightningModule):
     self.validation_step_outputs = []
 
     self._zero_virtual_feature_weights()
-    self.l1.copy_weights_from_first_expert()
+    if isinstance(self.l1, MoELinear):
+      self.l1.copy_weights_from_first_expert()
+    elif isinstance(self.l1, StackedLinear):
+      self.l1.copy_weights_from_first_bucket()
 
   def _zero_virtual_feature_weights(self) -> None:
     weights = self.input.weight
@@ -164,12 +176,17 @@ class NNUE(pl.LightningModule):
                (them * torch.cat([b_out, w_out], dim=1))
 
     l0_output = torch.clamp(l0_input, 0.0, 1.0)
-    if use_top1:
+    if isinstance(self.l1, MoELinear) and use_top1:
       l1_preact, _expert_indices = self.l1.forward_top1(l0_output)
       moe_aux_loss = l0_output.new_zeros(())
-    else:
+    elif isinstance(self.l1, MoELinear):
       l1_preact, route_probs = self.l1(l0_output)
       moe_aux_loss = self.l1.load_balancing_loss(route_probs)
+    elif isinstance(self.l1, StackedLinear):
+      raise ValueError("LayerStack forward requires bucket indices; call forward_layerstack().")
+    else:
+      l1_preact = self.l1(l0_output)
+      moe_aux_loss = l0_output.new_zeros(())
 
     l1_output = torch.clamp(l1_preact, 0.0, 1.0)
     l2_output = torch.clamp(self.l2(l1_output), 0.0, 1.0)
@@ -177,6 +194,32 @@ class NNUE(pl.LightningModule):
     if return_aux:
       return output, moe_aux_loss
     return output
+
+  def forward_layerstack(
+      self,
+      us: torch.Tensor,
+      them: torch.Tensor,
+      w_in: torch.Tensor,
+      b_in: torch.Tensor,
+      bucket_indices: torch.Tensor,
+  ) -> torch.Tensor:
+    w_out = self.input(w_in)
+    b_out = self.input(b_in)
+
+    l0_input = (us * torch.cat([w_out, b_out], dim=1)) + \
+               (them * torch.cat([b_out, w_out], dim=1))
+    l0_output = torch.clamp(l0_input, 0.0, 1.0)
+
+    if isinstance(self.l1, StackedLinear):
+      l1_preact = self.l1(l0_output, bucket_indices)
+    elif isinstance(self.l1, nn.Linear):
+      l1_preact = self.l1(l0_output)
+    else:
+      raise ValueError("forward_layerstack() is not valid for MoE mode.")
+
+    l1_output = torch.clamp(l1_preact, 0.0, 1.0)
+    l2_output = torch.clamp(self.l2(l1_output), 0.0, 1.0)
+    return self.output(l2_output)
 
   def step_(self, batch: Tuple, batch_idx: int, loss_type: str) -> torch.Tensor:
     if len(batch) == 8:
@@ -187,7 +230,12 @@ class NNUE(pl.LightningModule):
     else:
       raise ValueError(f'Unexpected batch format (len={len(batch)}). Expected 7 or 8 tensors.')
 
-    model_raw_output, moe_aux_loss = self(us_indices, them_indices, white_features, black_features, return_aux=True)
+    if isinstance(self.l1, StackedLinear):
+      ls_indices = torch.clamp((16384.0 - npm) * float(self.num_buckets) / 16384.0, 0, self.num_buckets - 1).long()
+      model_raw_output = self.forward_layerstack(us_indices, them_indices, white_features, black_features, ls_indices)
+      moe_aux_loss = model_raw_output.new_zeros(())
+    else:
+      model_raw_output, moe_aux_loss = self(us_indices, them_indices, white_features, black_features, return_aux=True)
     scaled_model_output = model_raw_output * self.NNUE_TO_SCORE_CONSTANT / self.score_scaling
 
     smoothed_outcome_prob = game_outcome * (1.0 - self.label_smoothing_eps * 2.0) + self.label_smoothing_eps
