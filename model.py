@@ -299,7 +299,11 @@ class NNUE(pl.LightningModule):
     return self.output(l2_output)
 
   def _compute_bucket_indices(self, npm: torch.Tensor) -> torch.Tensor:
-    return torch.clamp((16384.0 - npm) * float(self.num_buckets) / 16384.0, 0, self.num_buckets - 1).long()
+    return torch.clamp(
+      (16384.0 - npm) * float(self.num_buckets) / 16384.0,
+      0,
+      self.num_buckets - 1,
+    ).long().flatten()
 
   def _compute_primary_loss(
       self,
