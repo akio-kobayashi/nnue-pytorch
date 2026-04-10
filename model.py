@@ -350,6 +350,18 @@ class NNUE(pl.LightningModule):
     combined_entropy_result = current_lambda * teacher_entropy + (1.0 - current_lambda) * outcome_entropy
     return combined_loss_result.mean() - combined_entropy_result.mean()
 
+  def _log_moe_expert_stats(
+      self,
+      loss_type: str,
+      route_probs: torch.Tensor,
+      top1_indices: torch.Tensor,
+  ) -> None:
+    importance = route_probs.mean(dim=0)
+    load = F.one_hot(top1_indices, num_classes=self.num_buckets).to(route_probs.dtype).mean(dim=0)
+    for i in range(self.num_buckets):
+      self.log(f'{loss_type}_moe_importance_e{i}', importance[i], prog_bar=False)
+      self.log(f'{loss_type}_moe_load_e{i}', load[i], prog_bar=False)
+
   def step_(self, batch: Tuple, batch_idx: int, loss_type: str) -> torch.Tensor:
     if len(batch) == 8:
       us_indices, them_indices, white_features, black_features, game_outcome, search_score, current_ply, npm = batch
@@ -379,6 +391,7 @@ class NNUE(pl.LightningModule):
       moe_aux_loss = moe_stats["moe_aux_loss"]
       teacher_buckets = self._compute_grouped_teacher_buckets(npm)
       bucket_loss = F.cross_entropy(moe_stats["router_logits"], teacher_buckets)
+      self._log_moe_expert_stats(loss_type, moe_stats["route_probs"], moe_stats["top1_indices"])
 
       if loss_type != 'train_loss':
         top1_output, top1_stats = self(
