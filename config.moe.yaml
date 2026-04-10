@@ -9,6 +9,7 @@ model:
   moe_hard_routing_start_batch: 10000
   moe_straight_through: true
   moe_temperature: 1.0
+  moe_teacher_num_buckets: 8
   lambda_: [1.0]
   lr: [1.0]
   label_smoothing_eps: 0.0

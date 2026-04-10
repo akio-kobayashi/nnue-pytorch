@@ -143,6 +143,7 @@ class NNUE(pl.LightningModule):
       moe_hard_routing_start_batch: int = 10000,
       moe_straight_through: bool = True,
       moe_temperature: float = 1.0,
+      moe_teacher_num_buckets: int | None = None,
       l1_mode: str = "moe",
       l1_size: int = 256,
       l2_size: int = 32,
@@ -194,6 +195,7 @@ class NNUE(pl.LightningModule):
     self.moe_hard_routing_start_batch = moe_hard_routing_start_batch
     self.moe_straight_through = moe_straight_through
     self.moe_temperature = moe_temperature
+    self.moe_teacher_num_buckets = moe_teacher_num_buckets or num_buckets
     self.validation_step_outputs = []
 
     self._zero_virtual_feature_weights()
@@ -298,12 +300,21 @@ class NNUE(pl.LightningModule):
     l2_output = torch.clamp(self.l2(l1_output), 0.0, 1.0)
     return self.output(l2_output)
 
-  def _compute_bucket_indices(self, npm: torch.Tensor) -> torch.Tensor:
+  def _compute_bucket_indices(self, npm: torch.Tensor, num_buckets: int | None = None) -> torch.Tensor:
+    if num_buckets is None:
+      num_buckets = self.num_buckets
     return torch.clamp(
-      (16384.0 - npm) * float(self.num_buckets) / 16384.0,
+      (16384.0 - npm) * float(num_buckets) / 16384.0,
       0,
-      self.num_buckets - 1,
+      num_buckets - 1,
     ).long().flatten()
+
+  def _compute_grouped_teacher_buckets(self, npm: torch.Tensor) -> torch.Tensor:
+    teacher_buckets = self._compute_bucket_indices(npm, self.moe_teacher_num_buckets)
+    if self.moe_teacher_num_buckets == self.num_buckets:
+      return teacher_buckets
+    grouped = torch.div(teacher_buckets * self.num_buckets, self.moe_teacher_num_buckets, rounding_mode='floor')
+    return grouped.clamp_(0, self.num_buckets - 1)
 
   def _compute_primary_loss(
       self,
@@ -366,7 +377,7 @@ class NNUE(pl.LightningModule):
         return_aux=True,
       )
       moe_aux_loss = moe_stats["moe_aux_loss"]
-      teacher_buckets = self._compute_bucket_indices(npm)
+      teacher_buckets = self._compute_grouped_teacher_buckets(npm)
       bucket_loss = F.cross_entropy(moe_stats["router_logits"], teacher_buckets)
 
       if loss_type != 'train_loss':
@@ -388,6 +399,8 @@ class NNUE(pl.LightningModule):
       self.log(f'{loss_type}_moe_aux', moe_aux_loss)
       self.log(f'{loss_type}_moe_bucket', bucket_loss)
       self.log(f'{loss_type}_moe_hard', float(hard_routing))
+      if self.moe_teacher_num_buckets != self.num_buckets:
+        self.log(f'{loss_type}_moe_teacher_buckets', float(self.moe_teacher_num_buckets))
       if top1_loss is not None:
         self.log(f'{loss_type}_top1', top1_loss)
       if quantized_match is not None:
