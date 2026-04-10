@@ -49,16 +49,40 @@ class MoELinear(nn.Module):
         self.router = nn.Linear(in_features, num_experts)
         self.experts = nn.ModuleList([nn.Linear(in_features, out_features) for _ in range(num_experts)])
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def route(self, x: torch.Tensor, temperature: float = 1.0) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         logits = self.router(x)
-        probs = torch.softmax(logits, dim=1)
+        probs = torch.softmax(logits / temperature, dim=1)
+        top1_indices = logits.argmax(dim=1)
+        return logits, probs, top1_indices
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        hard: bool = False,
+        straight_through: bool = True,
+        temperature: float = 1.0,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor | bool]]:
+        logits, probs, top1_indices = self.route(x, temperature=temperature)
         expert_outputs = torch.stack([expert(x) for expert in self.experts], dim=1)
-        output = torch.sum(probs.unsqueeze(-1) * expert_outputs, dim=1)
-        return output, probs
+        if hard:
+            hard_gates = F.one_hot(top1_indices, num_classes=self.num_experts).to(x.dtype)
+            if straight_through:
+                gates = hard_gates - probs.detach() + probs
+            else:
+                gates = hard_gates
+        else:
+            gates = probs
+
+        output = torch.sum(gates.unsqueeze(-1) * expert_outputs, dim=1)
+        return output, {
+            "router_logits": logits,
+            "route_probs": probs,
+            "top1_indices": top1_indices,
+            "hard_routing": hard,
+        }
 
     def forward_top1(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        logits = self.router(x)
-        expert_indices = logits.argmax(dim=1)
+        logits, _probs, expert_indices = self.route(x)
         batch_size = x.shape[0]
         out_features = self.experts[0].out_features
         output = torch.zeros(batch_size, out_features, device=x.device, dtype=x.dtype)
@@ -76,9 +100,26 @@ class MoELinear(nn.Module):
                 self.experts[i].weight.copy_(first_expert.weight)
                 self.experts[i].bias.copy_(first_expert.bias)
 
-    def load_balancing_loss(self, route_probs: torch.Tensor) -> torch.Tensor:
+    def load_balancing_loss(self, route_probs: torch.Tensor, top1_indices: torch.Tensor) -> torch.Tensor:
         importance = route_probs.mean(dim=0)
-        return self.num_experts * torch.sum(importance * importance) - 1.0
+        load = F.one_hot(top1_indices, num_classes=self.num_experts).to(route_probs.dtype).mean(dim=0)
+        return self.num_experts * torch.sum(importance * load) - 1.0
+
+    def quantized_top1_indices(self, x: torch.Tensor) -> torch.Tensor:
+        with torch.no_grad():
+            x_q = torch.round(x.clamp(0.0, 1.0) * 127.0).to(torch.int32)
+            weight = self.router.weight.data
+            bias = self.router.bias.data
+
+            k_bias_scale = 8128.0
+            k_weight_scale = 8128.0 / 127.0
+            k_max_weight = 127.0 / k_weight_scale
+
+            weight_q = torch.round(weight.clamp(-k_max_weight, k_max_weight) * k_weight_scale).to(torch.int32)
+            bias_q = torch.round(bias * k_bias_scale).to(torch.int32)
+
+            logits_q = x_q @ weight_q.t() + bias_q
+            return logits_q.argmax(dim=1)
 
 class NNUE(pl.LightningModule):
   """
@@ -98,6 +139,10 @@ class NNUE(pl.LightningModule):
       ply_begin_threshold: float = 100.0,
       ply_end_threshold: float = 120.0,
       moe_aux_loss_weight: float = 0.01,
+      moe_bucket_loss_weight: float = 0.01,
+      moe_hard_routing_start_batch: int = 10000,
+      moe_straight_through: bool = True,
+      moe_temperature: float = 1.0,
       l1_mode: str = "moe",
       l1_size: int = 256,
       l2_size: int = 32,
@@ -145,6 +190,10 @@ class NNUE(pl.LightningModule):
     self.ply_begin_threshold = ply_begin_threshold
     self.ply_end_threshold = ply_end_threshold
     self.moe_aux_loss_weight = moe_aux_loss_weight
+    self.moe_bucket_loss_weight = moe_bucket_loss_weight
+    self.moe_hard_routing_start_batch = moe_hard_routing_start_batch
+    self.moe_straight_through = moe_straight_through
+    self.moe_temperature = moe_temperature
     self.validation_step_outputs = []
 
     self._zero_virtual_feature_weights()
@@ -167,8 +216,9 @@ class NNUE(pl.LightningModule):
       w_in: torch.Tensor,
       b_in: torch.Tensor,
       use_top1: bool = False,
+      hard_routing: bool = False,
       return_aux: bool = False,
-  ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+  ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor | bool]]:
     w_out = self.input(w_in)
     b_out = self.input(b_in)
 
@@ -177,22 +227,49 @@ class NNUE(pl.LightningModule):
 
     l0_output = torch.clamp(l0_input, 0.0, 1.0)
     if isinstance(self.l1, MoELinear) and use_top1:
-      l1_preact, _expert_indices = self.l1.forward_top1(l0_output)
-      moe_aux_loss = l0_output.new_zeros(())
+      l1_preact, top1_indices = self.l1.forward_top1(l0_output)
+      router_logits, route_probs, _ = self.l1.route(l0_output, temperature=self.moe_temperature)
+      moe_stats = {
+        "moe_aux_loss": l0_output.new_zeros(()),
+        "router_logits": router_logits,
+        "route_probs": route_probs,
+        "top1_indices": top1_indices,
+        "router_input": l0_output,
+        "hard_routing": True,
+      }
     elif isinstance(self.l1, MoELinear):
-      l1_preact, route_probs = self.l1(l0_output)
-      moe_aux_loss = self.l1.load_balancing_loss(route_probs)
+      l1_preact, routing_stats = self.l1(
+        l0_output,
+        hard=hard_routing,
+        straight_through=self.moe_straight_through,
+        temperature=self.moe_temperature,
+      )
+      moe_stats = {
+        "moe_aux_loss": self.l1.load_balancing_loss(routing_stats["route_probs"], routing_stats["top1_indices"]),
+        "router_logits": routing_stats["router_logits"],
+        "route_probs": routing_stats["route_probs"],
+        "top1_indices": routing_stats["top1_indices"],
+        "router_input": l0_output,
+        "hard_routing": routing_stats["hard_routing"],
+      }
     elif isinstance(self.l1, StackedLinear):
       raise ValueError("LayerStack forward requires bucket indices; call forward_layerstack().")
     else:
       l1_preact = self.l1(l0_output)
-      moe_aux_loss = l0_output.new_zeros(())
+      moe_stats = {
+        "moe_aux_loss": l0_output.new_zeros(()),
+        "router_logits": None,
+        "route_probs": None,
+        "top1_indices": None,
+        "router_input": l0_output,
+        "hard_routing": False,
+      }
 
     l1_output = torch.clamp(l1_preact, 0.0, 1.0)
     l2_output = torch.clamp(self.l2(l1_output), 0.0, 1.0)
     output = self.output(l2_output)
     if return_aux:
-      return output, moe_aux_loss
+      return output, moe_stats
     return output
 
   def forward_layerstack(
@@ -221,6 +298,43 @@ class NNUE(pl.LightningModule):
     l2_output = torch.clamp(self.l2(l1_output), 0.0, 1.0)
     return self.output(l2_output)
 
+  def _compute_bucket_indices(self, npm: torch.Tensor) -> torch.Tensor:
+    return torch.clamp((16384.0 - npm) * float(self.num_buckets) / 16384.0, 0, self.num_buckets - 1).long()
+
+  def _compute_primary_loss(
+      self,
+      model_raw_output: torch.Tensor,
+      game_outcome: torch.Tensor,
+      search_score: torch.Tensor,
+      current_ply: torch.Tensor | None,
+  ) -> torch.Tensor:
+    scaled_model_output = model_raw_output * self.NNUE_TO_SCORE_CONSTANT / self.score_scaling
+
+    smoothed_outcome_prob = game_outcome * (1.0 - self.label_smoothing_eps * 2.0) + self.label_smoothing_eps
+    scaled_search_score_prob = (search_score / self.score_scaling).sigmoid()
+
+    teacher_entropy = -(scaled_search_score_prob * (scaled_search_score_prob + self.EPSILON).log() +
+                        (1.0 - scaled_search_score_prob) * (1.0 - scaled_search_score_prob + self.EPSILON).log())
+    outcome_entropy = -(smoothed_outcome_prob * (smoothed_outcome_prob + self.EPSILON).log() +
+                        (1.0 - smoothed_outcome_prob) * (1.0 - smoothed_outcome_prob + self.EPSILON).log())
+
+    teacher_loss_term = -(scaled_search_score_prob * F.logsigmoid(scaled_model_output) +
+                           (1.0 - scaled_search_score_prob) * F.logsigmoid(-scaled_model_output))
+    outcome_loss_term = -(smoothed_outcome_prob * F.logsigmoid(scaled_model_output) +
+                           (1.0 - smoothed_outcome_prob) * F.logsigmoid(-scaled_model_output))
+
+    if self.lambda_[0] >= 0.0:
+      current_lambda: float | torch.Tensor = self.lambda_[0]
+    else:
+      if current_ply is None:
+        raise ValueError('Dynamic lambda is enabled (lambda_ < 0), but ply is missing from the batch.')
+      current_lambda = (self.ply_end_threshold - current_ply) / (self.ply_end_threshold - self.ply_begin_threshold)
+      current_lambda = torch.clamp(current_lambda, 0.0, 1.0)
+
+    combined_loss_result = current_lambda * teacher_loss_term + (1.0 - current_lambda) * outcome_loss_term
+    combined_entropy_result = current_lambda * teacher_entropy + (1.0 - current_lambda) * outcome_entropy
+    return combined_loss_result.mean() - combined_entropy_result.mean()
+
   def step_(self, batch: Tuple, batch_idx: int, loss_type: str) -> torch.Tensor:
     if len(batch) == 8:
       us_indices, them_indices, white_features, black_features, game_outcome, search_score, current_ply, npm = batch
@@ -231,42 +345,58 @@ class NNUE(pl.LightningModule):
       raise ValueError(f'Unexpected batch format (len={len(batch)}). Expected 7 or 8 tensors.')
 
     if isinstance(self.l1, StackedLinear):
-      ls_indices = torch.clamp((16384.0 - npm) * float(self.num_buckets) / 16384.0, 0, self.num_buckets - 1).long()
+      ls_indices = self._compute_bucket_indices(npm)
       model_raw_output = self.forward_layerstack(us_indices, them_indices, white_features, black_features, ls_indices)
       moe_aux_loss = model_raw_output.new_zeros(())
-    else:
-      model_raw_output, moe_aux_loss = self(us_indices, them_indices, white_features, black_features, return_aux=True)
-    scaled_model_output = model_raw_output * self.NNUE_TO_SCORE_CONSTANT / self.score_scaling
+      bucket_loss = model_raw_output.new_zeros(())
+      top1_loss = None
+      quantized_match = None
+    elif isinstance(self.l1, MoELinear):
+      hard_routing = loss_type == 'train_loss' and self.moe_straight_through and self.global_step >= self.moe_hard_routing_start_batch
+      model_raw_output, moe_stats = self(
+        us_indices,
+        them_indices,
+        white_features,
+        black_features,
+        hard_routing=hard_routing,
+        return_aux=True,
+      )
+      moe_aux_loss = moe_stats["moe_aux_loss"]
+      teacher_buckets = self._compute_bucket_indices(npm)
+      bucket_loss = F.cross_entropy(moe_stats["router_logits"], teacher_buckets)
 
-    smoothed_outcome_prob = game_outcome * (1.0 - self.label_smoothing_eps * 2.0) + self.label_smoothing_eps
-    scaled_search_score_prob = (search_score / self.score_scaling).sigmoid()
+      if loss_type != 'train_loss':
+        top1_output, top1_stats = self(
+          us_indices,
+          them_indices,
+          white_features,
+          black_features,
+          use_top1=True,
+          return_aux=True,
+        )
+        top1_loss = self._compute_primary_loss(top1_output, game_outcome, search_score, current_ply)
+        quantized_indices = self.l1.quantized_top1_indices(moe_stats["router_input"])
+        quantized_match = (quantized_indices == top1_stats["top1_indices"]).to(torch.float32).mean()
+      else:
+        top1_loss = None
+        quantized_match = None
 
-    teacher_entropy = -(scaled_search_score_prob * (scaled_search_score_prob + self.EPSILON).log() +
-                        (1.0 - scaled_search_score_prob) * (1.0 - scaled_search_score_prob + self.EPSILON).log())
-    outcome_entropy = -(smoothed_outcome_prob * (smoothed_outcome_prob + self.EPSILON).log() +
-                        (1.0 - smoothed_outcome_prob) * (1.0 - smoothed_outcome_prob + self.EPSILON).log())
-    
-    teacher_loss_term = -(scaled_search_score_prob * F.logsigmoid(scaled_model_output) +
-                           (1.0 - scaled_search_score_prob) * F.logsigmoid(-scaled_model_output))
-    outcome_loss_term = -(smoothed_outcome_prob * F.logsigmoid(scaled_model_output) +
-                           (1.0 - smoothed_outcome_prob) * F.logsigmoid(-scaled_model_output))
-    
-    current_lambda: float
-    if self.lambda_[0] >= 0.0:
-      current_lambda = self.lambda_[0]
+      self.log(f'{loss_type}_moe_aux', moe_aux_loss)
+      self.log(f'{loss_type}_moe_bucket', bucket_loss)
+      self.log(f'{loss_type}_moe_hard', float(hard_routing))
+      if top1_loss is not None:
+        self.log(f'{loss_type}_top1', top1_loss)
+      if quantized_match is not None:
+        self.log(f'{loss_type}_moe_quantized_match', quantized_match)
     else:
-      if current_ply is None:
-        raise ValueError('Dynamic lambda is enabled (lambda_ < 0), but ply is missing from the batch.')
-      current_lambda = (self.ply_end_threshold - current_ply) / (self.ply_end_threshold - self.ply_begin_threshold)
-      current_lambda = torch.clamp(current_lambda , 0.0, 1.0)
-    
-    combined_loss_result  = current_lambda * teacher_loss_term + (1.0 - current_lambda) * outcome_loss_term
-    combined_entropy_result = current_lambda * teacher_entropy + (1.0 - current_lambda) * outcome_entropy
-    
-    final_loss = combined_loss_result.mean() - combined_entropy_result.mean()
+      model_raw_output, _dense_stats = self(us_indices, them_indices, white_features, black_features, return_aux=True)
+      moe_aux_loss = model_raw_output.new_zeros(())
+      bucket_loss = model_raw_output.new_zeros(())
+
+    final_loss = self._compute_primary_loss(model_raw_output, game_outcome, search_score, current_ply)
     final_loss = final_loss + self.moe_aux_loss_weight * moe_aux_loss
+    final_loss = final_loss + self.moe_bucket_loss_weight * bucket_loss
     self.log(loss_type, final_loss)
-    self.log(f'{loss_type}_moe_aux', moe_aux_loss)
     return final_loss
 
   def training_step(self, batch: Tuple, batch_idx: int) -> torch.Tensor:

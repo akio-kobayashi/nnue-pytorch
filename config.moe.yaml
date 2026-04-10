@@ -5,6 +5,10 @@ model:
   l3_size: 32
   num_buckets: 8
   moe_aux_loss_weight: 0.01
+  moe_bucket_loss_weight: 0.01
+  moe_hard_routing_start_batch: 10000
+  moe_straight_through: true
+  moe_temperature: 1.0
   lambda_: [1.0]
   lr: [1.0]
   label_smoothing_eps: 0.0
