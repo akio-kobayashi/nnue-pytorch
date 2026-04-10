@@ -107,7 +107,7 @@ class MoELinear(nn.Module):
 
     def quantized_top1_indices(self, x: torch.Tensor) -> torch.Tensor:
         with torch.no_grad():
-            x_q = torch.round(x.clamp(0.0, 1.0) * 127.0).to(torch.int32)
+            x_q = torch.round(x.clamp(0.0, 1.0) * 127.0).to(torch.float32)
             weight = self.router.weight.data
             bias = self.router.bias.data
 
@@ -115,8 +115,8 @@ class MoELinear(nn.Module):
             k_weight_scale = 8128.0 / 127.0
             k_max_weight = 127.0 / k_weight_scale
 
-            weight_q = torch.round(weight.clamp(-k_max_weight, k_max_weight) * k_weight_scale).to(torch.int32)
-            bias_q = torch.round(bias * k_bias_scale).to(torch.int32)
+            weight_q = torch.round(weight.clamp(-k_max_weight, k_max_weight) * k_weight_scale).to(torch.float32)
+            bias_q = torch.round(bias * k_bias_scale).to(torch.float32)
 
             logits_q = x_q @ weight_q.t() + bias_q
             return logits_q.argmax(dim=1)
