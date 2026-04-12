@@ -44,6 +44,12 @@ def parse_args():
       default=True,
       help="Apply serialize-compatible FC weight clipping before inference",
   )
+  parser.add_argument(
+      "--fv-scale",
+      type=float,
+      default=16.0,
+      help="YaneuraOu FV_SCALE used to convert the serialized NNUE output into the final evaluation value.",
+  )
   parser.add_argument("--default-result", type=int, default=0, choices=[-1, 0, 1], help="game_result to use for SFEN text input")
   parser.add_argument("--default-move", type=int, default=0, help="move to use for SFEN text input")
   parser.add_argument("--default-ply", type=int, default=1, help="fallback ply for SFEN text input without a valid ply token")
@@ -60,6 +66,17 @@ def resolve_model_args(args, checkpoint):
   return resolved_features, resolved_l1_size, resolved_l2_size, resolved_l3_size
 
 
+def normalize_model_for_serialize_inference(model):
+  with torch.no_grad():
+    if hasattr(model, "_clip_linear_weight"):
+      for child in model.children():
+        if not isinstance(child, torch.nn.Linear):
+          continue
+        if child == model.input:
+          continue
+        model._clip_linear_weight(child)
+
+
 def load_model(args):
   checkpoint = torch.load(args.checkpoint, map_location="cpu")
   resolved_features, resolved_l1_size, resolved_l2_size, resolved_l3_size = resolve_model_args(args, checkpoint)
@@ -69,8 +86,10 @@ def load_model(args):
       l2_size=resolved_l2_size,
       l3_size=resolved_l3_size,
   )
-  upgraded_state_dict = serialize._upgrade_legacy_state_dict(checkpoint["state_dict"], resolved_features)
-  nnue.load_state_dict(upgraded_state_dict)
+  state_dict = checkpoint["state_dict"]
+  if hasattr(serialize, "_upgrade_legacy_state_dict"):
+    state_dict = serialize._upgrade_legacy_state_dict(state_dict, resolved_features)
+  nnue.load_state_dict(state_dict)
   serialize._load_checkpoint_extras(nnue, checkpoint)
   if args.use_ema and hasattr(nnue, "apply_ema_weights"):
     if not nnue.apply_ema_weights():
@@ -88,25 +107,23 @@ def load_model(args):
       f"l3={resolved_l3_size}",
       f"use_ema={args.use_ema}",
       f"serialize_normalize={args.serialize_normalize}",
+      f"fv_scale={args.fv_scale}",
   )
   return nnue, feature_set
 
 
-def normalize_model_for_serialize_inference(model):
-  with torch.no_grad():
-    if hasattr(model, "_clip_linear_weight"):
-      for child in model.children():
-        if not isinstance(child, torch.nn.Linear):
-          continue
-        if child == model.input:
-          continue
-        model._clip_linear_weight(child)
-
-
-def eval_model_batch(model, batch, device):
+def eval_model_batch(model, batch, device, fv_scale: float):
   us, them, white, black, outcome, score, ply = batch.contents.get_tensors(device)
   with torch.inference_mode():
-    evals = (model.forward(us, them, white, black) * float(model.NNUE_TO_SCORE)).reshape(-1)
+    # Approximate the final YaneuraOu evaluation value:
+    # serialized_output ~= model.forward(...) * NNUE_TO_SCORE * model.FV_SCALE
+    # final_score = serialized_output / FV_SCALE
+    evals = (
+        model.forward(us, them, white, black)
+        * float(model.NNUE_TO_SCORE)
+        * float(model.FV_SCALE)
+        / float(fv_scale)
+    ).reshape(-1)
   evals = evals.detach().cpu()
   them_mask = them.reshape(-1).detach().cpu() > 0.5
   evals[them_mask] *= -1.0
@@ -287,6 +304,8 @@ def main():
   args = parse_args()
   if args.batch_size <= 0:
     raise ValueError("--batch-size must be > 0")
+  if args.fv_scale <= 0:
+    raise ValueError("--fv-scale must be > 0")
 
   model, feature_set = load_model(args)
   device = torch.device(args.device)
@@ -311,7 +330,7 @@ def main():
     for batch_records_ in iter_input_batches(args, input_format, input_path):
       batch = records_to_sparse_batch(feature_set, batch_records_)
       try:
-        scores = eval_model_batch(model, batch, device)
+        scores = eval_model_batch(model, batch, device, args.fv_scale)
       finally:
         nnue_dataset.destroy_sparse_batch(batch)
 
