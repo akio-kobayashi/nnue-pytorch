@@ -2,6 +2,7 @@ import argparse
 from pathlib import Path
 from typing import Iterator
 
+import numpy as np
 import torch
 
 import cshogi
@@ -252,7 +253,7 @@ def records_to_sparse_batch(feature_set, records: list[bytes]):
   plies = []
   results = []
   for record in records:
-    board.set_psfen(record_sfen_bytes(record))
+    board.set_psfen(np.frombuffer(record_sfen_bytes(record), dtype=np.uint8))
     fens.append(board.sfen())
     scores.append(record_score(record))
     plies.append(record_ply(record))
