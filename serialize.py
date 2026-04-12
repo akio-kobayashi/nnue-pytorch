@@ -27,6 +27,9 @@ VERSION = 0x7AF32F16
 WEIGHT_SCALE_BITS = 6
 ACTIVATION_SCALE = 127.0
 OUTPUT_BIAS_SCALE = 9600.0  # kPonanzaConstant * FV_SCALE = 600 * 16 = 9600
+LEGACY_FEATURE_DIMENSIONS = {
+    127118: "HalfKPx4",
+}
 
 
 def _infer_features_from_input_dim(input_dim: int) -> str:
@@ -34,6 +37,8 @@ def _infer_features_from_input_dim(input_dim: int) -> str:
     feature_set = features.get_feature_set_from_name(feature_name)
     if feature_set.num_features == input_dim:
       return feature_name
+  if input_dim in LEGACY_FEATURE_DIMENSIONS:
+    return LEGACY_FEATURE_DIMENSIONS[input_dim]
   raise ValueError(f"Could not infer feature set from input dimension {input_dim}")
 
 
@@ -51,6 +56,30 @@ def _load_checkpoint_extras(model, checkpoint):
   # when loading a raw .ckpt for export.
   if hasattr(model, "on_load_checkpoint"):
     model.on_load_checkpoint(checkpoint)
+
+
+def _upgrade_legacy_state_dict(state_dict, resolved_features):
+  upgraded = dict(state_dict)
+  input_weight = upgraded.get("input.weight")
+  if input_weight is None:
+    return upgraded
+
+  feature_set = features.get_feature_set_from_name(resolved_features)
+  current_dim = int(input_weight.shape[1])
+  target_dim = int(feature_set.num_features)
+  if current_dim == target_dim:
+    return upgraded
+
+  if resolved_features == "HalfKPx4" and current_dim == target_dim - 1:
+    padded_weight = input_weight.new_zeros((input_weight.shape[0], target_dim))
+    padded_weight[:, :current_dim] = input_weight
+    upgraded["input.weight"] = padded_weight
+    return upgraded
+
+  raise ValueError(
+      f"Cannot upgrade checkpoint input dimension {current_dim} to feature set "
+      f"{resolved_features} with dimension {target_dim}"
+  )
 
 
 def _canonical_feature_name(feature_set_name: str) -> str:
@@ -341,7 +370,8 @@ def main():
           l2_size=resolved_l2_size,
           l3_size=resolved_l3_size,
       )
-      nnue.load_state_dict(checkpoint["state_dict"])
+      upgraded_state_dict = _upgrade_legacy_state_dict(checkpoint["state_dict"], resolved_features)
+      nnue.load_state_dict(upgraded_state_dict)
       _load_checkpoint_extras(nnue, checkpoint)
     if args.use_ema and hasattr(nnue, "apply_ema_weights"):
       if not nnue.apply_ema_weights():
