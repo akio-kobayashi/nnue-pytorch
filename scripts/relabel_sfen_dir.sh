@@ -4,16 +4,16 @@ set -euo pipefail
 
 if [[ $# -lt 3 ]]; then
   cat <<'EOF'
-usage: scripts/relabel_first_10_sfen.sh CHECKPOINT INPUT_DIR OUTPUT_DIR [extra psv_re_eval args...]
+usage: scripts/relabel_sfen_dir.sh CHECKPOINT INPUT_DIR OUTPUT_DIR [extra psv_re_eval args...]
 
-Relabel the first 10 *.sfen files under INPUT_DIR and write them as:
+Relabel all *.sfen files under INPUT_DIR and write them as:
   OUTPUT_DIR/0000.bin
   OUTPUT_DIR/0001.bin
   ...
 
 Examples:
-  scripts/relabel_first_10_sfen.sh model.ckpt ./sfens ./out --device cuda:0 --batch-size 4096
-  scripts/relabel_first_10_sfen.sh model.ckpt ./sfens ./out --use_ema
+  scripts/relabel_sfen_dir.sh model.ckpt ./sfens ./out --device cuda:0 --batch-size 4096
+  scripts/relabel_sfen_dir.sh model.ckpt ./sfens ./out --use_ema
 EOF
   exit 1
 fi
@@ -25,7 +25,7 @@ shift 3
 
 mkdir -p "$output_dir"
 
-mapfile -t sfen_files < <(find "$input_dir" -maxdepth 1 -type f -name '*.sfen' | sort | head -n 10)
+mapfile -t sfen_files < <(find "$input_dir" -maxdepth 1 -type f -name '*.sfen' | sort)
 
 if [[ ${#sfen_files[@]} -eq 0 ]]; then
   echo "No .sfen files found in $input_dir" >&2
