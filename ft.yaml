@@ -31,6 +31,9 @@ model:
 
 data:
   features: HalfKP
+  # train / val can point to either:
+  # - a single .bin file
+  # - a .txt manifest listing one .bin path per line
   train: ../train.bin
   val: ../val.bin
   smart_fen_skipping: true
