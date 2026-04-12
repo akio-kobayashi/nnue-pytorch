@@ -78,7 +78,18 @@ def load_model(args):
   if args.serialize_normalize:
     normalize_model_for_serialize_inference(nnue)
   nnue.eval()
-  return nnue, features.get_feature_set_from_name(resolved_features)
+  feature_set = features.get_feature_set_from_name(resolved_features)
+  print(
+      "loaded checkpoint:",
+      Path(args.checkpoint),
+      f"features={resolved_features}",
+      f"l1={resolved_l1_size}",
+      f"l2={resolved_l2_size}",
+      f"l3={resolved_l3_size}",
+      f"use_ema={args.use_ema}",
+      f"serialize_normalize={args.serialize_normalize}",
+  )
+  return nnue, feature_set
 
 
 def normalize_model_for_serialize_inference(model):
@@ -261,6 +272,17 @@ def records_to_sparse_batch(feature_set, records: list[bytes]):
   return nnue_dataset.make_sparse_batch_from_fens(feature_set, fens, scores, plies, results)
 
 
+def log_score_samples(records: list[bytes], scores: list[int], limit: int = 3):
+  for idx, (record, new_score) in enumerate(zip(records[:limit], scores[:limit]), start=1):
+    print(
+        f"sample[{idx}]",
+        f"old_score={record_score(record)}",
+        f"new_score={int(new_score)}",
+        f"ply={record_ply(record)}",
+        f"result={record_result(record)}",
+    )
+
+
 def main():
   args = parse_args()
   if args.batch_size <= 0:
@@ -273,8 +295,18 @@ def main():
   input_format, input_path, total = load_input_spec(args)
   output_path = Path(args.output_bin)
   output_path.parent.mkdir(parents=True, exist_ok=True)
+  print(
+      "relabel input:",
+      input_path,
+      f"format={input_format}",
+      f"records={total if total is not None else 'unknown'}",
+      f"device={device}",
+      f"batch_size={args.batch_size}",
+  )
+  print("relabel output:", output_path)
 
   processed = 0
+  logged_samples = False
   with open(output_path, "wb") as out_file:
     for batch_records_ in iter_input_batches(args, input_format, input_path):
       batch = records_to_sparse_batch(feature_set, batch_records_)
@@ -282,6 +314,10 @@ def main():
         scores = eval_model_batch(model, batch, device)
       finally:
         nnue_dataset.destroy_sparse_batch(batch)
+
+      if not logged_samples:
+        log_score_samples(batch_records_, scores)
+        logged_samples = True
 
       for record, score in zip(batch_records_, scores):
         out_file.write(build_record(
