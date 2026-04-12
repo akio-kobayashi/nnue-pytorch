@@ -45,12 +45,7 @@ def parse_args():
       help="Apply serialize-compatible FC weight clipping before inference",
   )
   parser.add_argument(
-      "--fv-scale",
-      type=float,
-      default=16.0,
-      help="YaneuraOu FV_SCALE used to convert the serialized NNUE output into the final evaluation value.",
-  )
-  parser.add_argument("--default-result", type=int, default=0, choices=[-1, 0, 1], help="game_result to use for SFEN text input")
+      "--default-result", type=int, default=0, choices=[-1, 0, 1], help="game_result to use for SFEN text input")
   parser.add_argument("--default-move", type=int, default=0, help="move to use for SFEN text input")
   parser.add_argument("--default-ply", type=int, default=1, help="fallback ply for SFEN text input without a valid ply token")
   return parser.parse_args()
@@ -107,23 +102,19 @@ def load_model(args):
       f"l3={resolved_l3_size}",
       f"use_ema={args.use_ema}",
       f"serialize_normalize={args.serialize_normalize}",
-      f"fv_scale={args.fv_scale}",
+      "score_formula=forward*600",
   )
   return nnue, feature_set
 
 
-def eval_model_batch(model, batch, device, fv_scale: float):
+def eval_model_batch(model, batch, device):
   us, them, white, black, outcome, score, ply = batch.contents.get_tensors(device)
   with torch.inference_mode():
-    # Approximate the final YaneuraOu evaluation value:
-    # serialized_output ~= model.forward(...) * NNUE_TO_SCORE * model.FV_SCALE
-    # final_score = serialized_output / FV_SCALE
-    evals = (
-        model.forward(us, them, white, black)
-        * float(model.NNUE_TO_SCORE)
-        * float(model.FV_SCALE)
-        / float(fv_scale)
-    ).reshape(-1)
+    # YaneuraOu's final score is output[0] / FV_SCALE, while the serialized
+    # output layer scales weights and biases by kPonanzaConstant * FV_SCALE.
+    # FV_SCALE cancels out, so the float model's corresponding score is:
+    #   final_score ~= model.forward(...) * kPonanzaConstant
+    evals = (model.forward(us, them, white, black) * float(model.NNUE_TO_SCORE)).reshape(-1)
   evals = evals.detach().cpu()
   them_mask = them.reshape(-1).detach().cpu() > 0.5
   evals[them_mask] *= -1.0
@@ -304,8 +295,6 @@ def main():
   args = parse_args()
   if args.batch_size <= 0:
     raise ValueError("--batch-size must be > 0")
-  if args.fv_scale <= 0:
-    raise ValueError("--fv-scale must be > 0")
 
   model, feature_set = load_model(args)
   device = torch.device(args.device)
@@ -330,7 +319,7 @@ def main():
     for batch_records_ in iter_input_batches(args, input_format, input_path):
       batch = records_to_sparse_batch(feature_set, batch_records_)
       try:
-        scores = eval_model_batch(model, batch, device, args.fv_scale)
+        scores = eval_model_batch(model, batch, device)
       finally:
         nnue_dataset.destroy_sparse_batch(batch)
 
