@@ -15,7 +15,7 @@ def parse_args():
   parser = argparse.ArgumentParser(
       description=(
           "Load a trained nnue-pytorch checkpoint, evaluate PackedSfenValue records in batches, "
-          "replace only the score field, and write a new PackedSfenValue .bin file."
+          "and write a new PackedSfenValue .bin file with updated scores."
       ))
   parser.add_argument("checkpoint", help="Path to a .ckpt checkpoint")
   parser.add_argument("input_bin", help="Input PackedSfenValue .bin")
@@ -27,6 +27,18 @@ def parse_args():
   parser.add_argument("--l2_size", type=int, default=None)
   parser.add_argument("--l3_size", type=int, default=None)
   parser.add_argument("--use_ema", action="store_true", help="Use EMA weights saved in the checkpoint")
+  parser.add_argument(
+      "--serialize-normalize",
+      action=argparse.BooleanOptionalAction,
+      default=True,
+      help="Apply serialize-compatible FC weight clipping before inference",
+  )
+  parser.add_argument(
+      "--fv-scale",
+      type=float,
+      default=16.0,
+      help="YaneuraOu FV_SCALE used to convert the serialized NNUE output into the final evaluation value.",
+  )
   return parser.parse_args()
 
 
@@ -40,6 +52,17 @@ def resolve_model_args(args, checkpoint):
   return resolved_features, resolved_l1_size, resolved_l2_size, resolved_l3_size
 
 
+def normalize_model_for_serialize_inference(model):
+  with torch.no_grad():
+    if hasattr(model, "_clip_linear_weight"):
+      for child in model.children():
+        if not isinstance(child, torch.nn.Linear):
+          continue
+        if child == model.input:
+          continue
+        model._clip_linear_weight(child)
+
+
 def load_model(args):
   checkpoint = torch.load(args.checkpoint, map_location="cpu")
   resolved_features, resolved_l1_size, resolved_l2_size, resolved_l3_size = resolve_model_args(args, checkpoint)
@@ -49,20 +72,44 @@ def load_model(args):
       l2_size=resolved_l2_size,
       l3_size=resolved_l3_size,
   )
-  upgraded_state_dict = serialize._upgrade_legacy_state_dict(checkpoint["state_dict"], resolved_features)
-  nnue.load_state_dict(upgraded_state_dict)
+  state_dict = checkpoint["state_dict"]
+  if hasattr(serialize, "_upgrade_legacy_state_dict"):
+    state_dict = serialize._upgrade_legacy_state_dict(state_dict, resolved_features)
+  nnue.load_state_dict(state_dict)
   serialize._load_checkpoint_extras(nnue, checkpoint)
   if args.use_ema and hasattr(nnue, "apply_ema_weights"):
     if not nnue.apply_ema_weights():
       raise RuntimeError("Requested --use_ema but no EMA weights were found in the checkpoint.")
+  if args.serialize_normalize:
+    normalize_model_for_serialize_inference(nnue)
   nnue.eval()
-  return nnue, features.get_feature_set_from_name(resolved_features)
+  feature_set = features.get_feature_set_from_name(resolved_features)
+  print(
+      "loaded checkpoint:",
+      Path(args.checkpoint),
+      f"features={resolved_features}",
+      f"l1={resolved_l1_size}",
+      f"l2={resolved_l2_size}",
+      f"l3={resolved_l3_size}",
+      f"use_ema={args.use_ema}",
+      f"serialize_normalize={args.serialize_normalize}",
+      f"fv_scale={args.fv_scale}",
+  )
+  return nnue, feature_set
 
 
-def eval_model_batch(model, batch, device):
+def eval_model_batch(model, batch, device, fv_scale: float):
   us, them, white, black, outcome, score, ply = batch.contents.get_tensors(device)
   with torch.inference_mode():
-    evals = (model.forward(us, them, white, black) * 600.0).reshape(-1)
+    # Approximate the final YaneuraOu evaluation value:
+    # serialized_output ~= model.forward(...) * NNUE_TO_SCORE * model.FV_SCALE
+    # final_score = serialized_output / FV_SCALE
+    evals = (
+        model.forward(us, them, white, black)
+        * float(model.NNUE_TO_SCORE)
+        * float(model.FV_SCALE)
+        / float(fv_scale)
+    ).reshape(-1)
   evals = evals.detach().cpu().numpy()
   them_np = them.reshape(-1).detach().cpu().numpy()
   evals[them_np > 0.5] *= -1.0
@@ -70,10 +117,25 @@ def eval_model_batch(model, batch, device):
   return evals
 
 
+def log_score_samples(input_psv, output_scores, start, limit=3):
+  count = min(limit, len(output_scores))
+  for offset in range(count):
+    record = input_psv[start + offset]
+    print(
+        f"sample[{offset + 1}]",
+        f"old_score={int(record['score'])}",
+        f"new_score={int(output_scores[offset])}",
+        f"ply={int(record['gamePly'])}",
+        f"result={int(record['game_result'])}",
+    )
+
+
 def main():
   args = parse_args()
   if args.batch_size <= 0:
     raise ValueError("--batch-size must be > 0")
+  if args.fv_scale <= 0:
+    raise ValueError("--fv-scale must be > 0")
 
   model, feature_set = load_model(args)
   device = torch.device(args.device)
@@ -85,8 +147,18 @@ def main():
   output_psv = np.memmap(output_path, dtype=cshogi.PackedSfenValue, mode="w+", shape=input_psv.shape)
   output_psv[:] = input_psv[:]
 
+  print(
+      "relabel input:",
+      Path(args.input_bin),
+      f"records={len(input_psv)}",
+      f"device={device}",
+      f"batch_size={args.batch_size}",
+  )
+  print("relabel output:", output_path)
+
   board = cshogi.Board()
   total = len(input_psv)
+  logged_samples = False
   for start in range(0, total, args.batch_size):
     end = min(start + args.batch_size, total)
     fens = []
@@ -103,9 +175,14 @@ def main():
 
     batch = nnue_dataset.make_sparse_batch_from_fens(feature_set, fens, scores, plies, results)
     try:
-      output_psv[start:end]["score"] = eval_model_batch(model, batch, device)
+      output_scores = eval_model_batch(model, batch, device, args.fv_scale)
     finally:
       nnue_dataset.destroy_sparse_batch(batch)
+
+    output_psv[start:end]["score"] = output_scores
+    if not logged_samples:
+      log_score_samples(input_psv, output_scores, start)
+      logged_samples = True
 
     processed = end
     if processed == total or processed % max(args.batch_size * 32, 1) == 0:
