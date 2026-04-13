@@ -114,10 +114,11 @@ def eval_model_batch(model, batch, device):
     # output layer scales weights and biases by kPonanzaConstant * FV_SCALE.
     # FV_SCALE cancels out, so the float model's corresponding score is:
     #   final_score ~= model.forward(...) * kPonanzaConstant
+    # The feature inputs are already ordered so that the side to move is
+    # presented first, therefore the network output is already in the
+    # side-to-move frame and must not be flipped again.
     evals = (model.forward(us, them, white, black) * float(model.NNUE_TO_SCORE)).reshape(-1)
   evals = evals.detach().cpu()
-  them_mask = them.reshape(-1).detach().cpu() > 0.5
-  evals[them_mask] *= -1.0
   evals = torch.clamp(torch.round(evals), -32768.0, 32767.0).to(torch.int16)
   return evals.tolist()
 
