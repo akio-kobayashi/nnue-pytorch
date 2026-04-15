@@ -42,6 +42,13 @@ data:
   py_data_sampling_seed: 42
 
 trainer:
+  default_root_dir:
   accelerator: gpu
   devices: 1
-  max_epochs: 300
+  logger:
+    class_path: pytorch_lightning.loggers.TensorBoardLogger
+    init_args:
+      save_dir:
+      name:
+      version: ""
+  max_epochs: 1000
