@@ -44,6 +44,7 @@ for idx in "${!input_files[@]}"; do
     "$checkpoint" \
     "$input_path" \
     "$output_path" \
+    --device cuda:0 --batch-size 131056 \
     --input-format bin \
     "$@"
 done
