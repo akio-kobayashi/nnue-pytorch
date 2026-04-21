@@ -8,13 +8,13 @@ Usage:
   prepare_shuffled_bin_split.sh --input-dir DIR --output-dir DIR [options]
 
 Description:
-  Shuffle 0000.bin .. 0099.bin into 0000_shuffled.bin .. 0099_shuffled.bin,
-  write their absolute paths into train.txt, then shuffle 0100.bin and extract
+  Shuffle 0101.bin .. 1014.bin into 0101_shuffled.bin .. 1014_shuffled.bin,
+  write their absolute paths into train.txt, then shuffle 1015.bin and extract
   either the first N blocks or the first M samples into a validation binary and
   write its absolute path into val.txt.
 
 Options:
-  --input-dir DIR         Directory containing 0000.bin .. 0100.bin
+  --input-dir DIR         Directory containing 0101.bin .. 1015.bin
   --output-dir DIR        Directory to place shuffled binaries and txt manifests
   --seed N                Base random seed (default: 0)
   --record-size BYTES     Packed record size in bytes (default: 40)
@@ -149,7 +149,7 @@ shuffle_one() {
     --num-buckets "$NUM_BUCKETS"
 }
 
-for i in $(seq 0 99); do
+for i in $(seq 101 1014); do
   stem=$(printf "%04d" "$i")
   input_path="$INPUT_DIR/$stem.bin"
   output_path="$OUTPUT_DIR/${stem}_shuffled.bin"
@@ -158,12 +158,12 @@ for i in $(seq 0 99); do
   python3 -c 'import os,sys; print(os.path.abspath(sys.argv[1]))' "$output_path" >> "$TRAIN_MANIFEST_PATH"
 done
 
-val_input="$INPUT_DIR/0100.bin"
-val_shuffled="$OUTPUT_DIR/0100_shuffled.bin"
-val_output="$OUTPUT_DIR/0100_val.bin"
+val_input="$INPUT_DIR/1015.bin"
+val_shuffled="$OUTPUT_DIR/1015_shuffled.bin"
+val_output="$OUTPUT_DIR/1015_val.bin"
 [[ -f "$val_input" ]] || fail "missing validation source: $val_input"
 
-shuffle_one "$val_input" "$val_shuffled" $((SEED + 100))
+shuffle_one "$val_input" "$val_shuffled" $((SEED + 1015))
 
 if [[ -n "$VAL_SAMPLES" ]]; then
   count_bytes=$((VAL_SAMPLES * RECORD_SIZE))
