@@ -2,11 +2,14 @@ import torch
 from torch import nn
 from torch import Tensor
 import torch.nn.functional as F
+from torch.func import functional_call
 import pytorch_lightning as pl
 from collections.abc import Callable, Iterator
 from typing import Any
 from torch.optim import Optimizer
+import cshogi
 import features as features_module
+import nnue_dataset
 
 Batch = tuple[Tensor, ...]
 TensorDict = dict[str, Tensor]
@@ -30,7 +33,12 @@ class NNUE(pl.LightningModule):
       ema_enabled: bool = False, ema_decay: float = 0.9995, ema_update_every: int = 1, ema_start_step: int = 1000,
       teacher_temperature: float = 1.0, entropy_coef: float = 1.0, outcome_pos_weight: float = 1.0,
       corn_aux_weight: float = 0.0, corn_aux_thresholds: list[float] | None = None,
-      king_zone_aux_weight: float = 0.0, major_safety_aux_weight: float = 0.0):
+      king_zone_aux_weight: float = 0.0, major_safety_aux_weight: float = 0.0,
+      preference_route: str = "none", preference_weight: float = 1.0, preference_beta: float = 1.0,
+      fixed_ref_max_legal_moves: int = 0, preference_num_contexts: int = 8,
+      preference_delta_scale: float = 1.0, base_ckpt: str = "", use_ema_weights: bool = False,
+      input_adapter: str = "none", input_adapter_rank: int = 8, input_adapter_alpha: float = 1.0,
+      input_adapter_init_std: float = 1e-3, freeze_base_input: bool = False):
     super().__init__()
     if lambda_ is None:
       lambda_ = [1.0]
@@ -77,8 +85,130 @@ class NNUE(pl.LightningModule):
     self.corn_aux_thresholds = sorted(float(v) for v in corn_aux_thresholds)
     self.king_zone_aux_weight = max(float(king_zone_aux_weight), 0.0)
     self.major_safety_aux_weight = max(float(major_safety_aux_weight), 0.0)
+    if preference_route not in {"none", "fixed_ref"}:
+      raise ValueError(f"Unsupported preference_route: {preference_route}")
+    self.preference_route = preference_route
+    self.preference_weight = max(float(preference_weight), 0.0)
+    self.preference_beta = float(preference_beta)
+    self.fixed_ref_max_legal_moves = max(int(fixed_ref_max_legal_moves), 0)
+    self.preference_num_contexts = max(int(preference_num_contexts), 1)
+    self.preference_delta_scale = float(preference_delta_scale)
+    self.context_embedding = (
+        nn.Embedding(self.preference_num_contexts, l3_size)
+        if self.preference_route == "fixed_ref"
+        else None
+    )
+    self.input_adapter = "none"
+    self.input_adapter_rank = max(1, int(input_adapter_rank))
+    self.input_adapter_alpha = float(input_adapter_alpha)
+    self.input_adapter_init_std = max(float(input_adapter_init_std), 0.0)
+    self.freeze_base_input = bool(freeze_base_input)
+    self.input_lora_a: nn.Parameter | None = None
+    self.input_lora_b: nn.Parameter | None = None
+    self._fixed_ref_state: TensorDict = {}
 
     self._zero_virtual_feature_weights()
+    self.configure_input_adapter(
+        input_adapter=input_adapter,
+        input_adapter_rank=input_adapter_rank,
+        input_adapter_alpha=input_adapter_alpha,
+        input_adapter_init_std=input_adapter_init_std,
+        freeze_base_input=freeze_base_input,
+    )
+    if base_ckpt:
+      self._load_base_checkpoint(base_ckpt, use_ema_weights=use_ema_weights)
+
+  def _load_checkpoint_state(self, base_ckpt: str) -> tuple[TensorDict, dict[str, Any]]:
+    checkpoint = torch.load(base_ckpt, map_location="cpu")
+    if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+      return checkpoint["state_dict"], checkpoint
+    if isinstance(checkpoint, dict):
+      return checkpoint, {}
+    if hasattr(checkpoint, "state_dict"):
+      return checkpoint.state_dict(), {}
+    raise TypeError(f"Unsupported checkpoint format for {base_ckpt}")
+
+  def _load_base_checkpoint(self, base_ckpt: str, use_ema_weights: bool = False) -> None:
+    state_dict, checkpoint = self._load_checkpoint_state(base_ckpt)
+    state_dict = {
+        key: value
+        for key, value in state_dict.items()
+        if not key.startswith("context_embedding.")
+    }
+    incompatible = self.load_state_dict(state_dict, strict=False)
+    allowed_missing = set()
+    if self.context_embedding is not None:
+      allowed_missing.add("context_embedding.weight")
+    if self.input_adapter == "halfkp_lora":
+      allowed_missing.update({"input_lora_a", "input_lora_b"})
+    unexpected = set(incompatible.unexpected_keys)
+    missing = set(incompatible.missing_keys) - allowed_missing
+    if unexpected or missing:
+      raise RuntimeError(
+          "base_ckpt is incompatible with the current NNUE model: "
+          f"missing={sorted(missing)}, unexpected={sorted(unexpected)}"
+      )
+
+    if checkpoint:
+      self.on_load_checkpoint(checkpoint)
+
+    if use_ema_weights:
+      if not self.apply_ema_weights():
+        raise RuntimeError("Requested use_ema_weights=True but no EMA weights were found in base_ckpt.")
+      # Training should start from the EMA parameters themselves.
+      self._ema_backup = None
+
+  def _set_base_input_trainable(self, trainable: bool) -> None:
+    self.input.weight.requires_grad = trainable
+    if self.input.bias is not None:
+      self.input.bias.requires_grad = trainable
+
+  def _clear_input_adapter_parameters(self) -> None:
+    self.register_parameter("input_lora_a", None)
+    self.register_parameter("input_lora_b", None)
+
+  def configure_input_adapter(
+      self,
+      input_adapter: str = "none",
+      input_adapter_rank: int = 8,
+      input_adapter_alpha: float = 1.0,
+      input_adapter_init_std: float = 1e-3,
+      freeze_base_input: bool = False,
+  ) -> None:
+    adapter = input_adapter.lower()
+    if adapter not in {"none", "halfkp_lora"}:
+      raise ValueError(f"Unsupported input_adapter: {input_adapter}")
+
+    self.input_adapter = adapter
+    self.input_adapter_rank = max(1, int(input_adapter_rank))
+    self.input_adapter_alpha = float(input_adapter_alpha)
+    self.input_adapter_init_std = max(float(input_adapter_init_std), 0.0)
+    self.freeze_base_input = bool(freeze_base_input)
+    self._clear_input_adapter_parameters()
+
+    if adapter == "halfkp_lora":
+      in_features = self.input.in_features
+      out_features = self.input.out_features
+      a = self.input.weight.new_zeros((self.input_adapter_rank, in_features))
+      b = self.input.weight.new_zeros((out_features, self.input_adapter_rank))
+      if self.input_adapter_init_std > 0.0:
+        nn.init.normal_(a, mean=0.0, std=self.input_adapter_init_std)
+      self.input_lora_a = nn.Parameter(a)
+      self.input_lora_b = nn.Parameter(b)
+
+    self._set_base_input_trainable(not self.freeze_base_input)
+
+  def get_effective_input_weight(self) -> Tensor:
+    weight = self.input.weight
+    if self.input_adapter == "halfkp_lora":
+      if self.input_lora_a is None or self.input_lora_b is None:
+        return weight
+      scale = self.input_adapter_alpha / float(self.input_adapter_rank)
+      return weight + scale * (self.input_lora_b @ self.input_lora_a)
+    return weight
+
+  def get_effective_input_bias(self) -> Tensor:
+    return self.input.bias
 
   '''
   We zero all virtual feature weights because during serialization to .nnue
@@ -130,13 +260,24 @@ class NNUE(pl.LightningModule):
       padding = weights.new_zeros((weights.shape[0], new_feature_block.num_virtual_features))
       weights = torch.cat([weights, padding], dim=1)
       self.input.weight = nn.Parameter(weights)
+      self.input.in_features = new_feature_set.num_features
       self.feature_set = new_feature_set
+      if self.input_adapter != "none":
+        self.configure_input_adapter(
+            input_adapter=self.input_adapter,
+            input_adapter_rank=self.input_adapter_rank,
+            input_adapter_alpha=self.input_adapter_alpha,
+            input_adapter_init_std=self.input_adapter_init_std,
+            freeze_base_input=self.freeze_base_input,
+        )
     else:
       raise Exception('Cannot change feature set from {} to {}.'.format(self.feature_set.name, new_feature_set.name))
 
   def _forward_hidden(self, us: Tensor, them: Tensor, w_in: Tensor, b_in: Tensor) -> Tensor:
-    w = self.input(w_in)
-    b = self.input(b_in)
+    effective_weight = self.get_effective_input_weight()
+    effective_bias = self.get_effective_input_bias()
+    w = F.linear(w_in, effective_weight, effective_bias)
+    b = F.linear(b_in, effective_weight, effective_bias)
     l0_ = (us * torch.cat([w, b], dim=1)) + (them * torch.cat([b, w], dim=1))
     # clamp here is used as a clipped relu to (0.0, 1.0)
     l0_ = torch.clamp(l0_, 0.0, 1.0)
@@ -146,6 +287,30 @@ class NNUE(pl.LightningModule):
 
   def forward(self, us: Tensor, them: Tensor, w_in: Tensor, b_in: Tensor) -> Tensor:
     return self.output(self._forward_hidden(us, them, w_in, b_in))
+
+  def _forward_context_delta(self, hidden: Tensor, context_id: Tensor) -> Tensor:
+    if self.context_embedding is None:
+      raise RuntimeError("context_embedding is only available for preference_route=fixed_ref")
+    if hidden.shape[0] != context_id.shape[0]:
+      raise ValueError("hidden and context_id batch sizes must match")
+    if torch.any(context_id < 0) or torch.any(context_id >= self.preference_num_contexts):
+      raise ValueError(
+          f"context_id is outside [0, {self.preference_num_contexts}); "
+          "increase model.preference_num_contexts"
+      )
+    embedding = self.context_embedding(context_id.to(device=hidden.device, dtype=torch.long))
+    return (hidden * embedding).sum(dim=1, keepdim=True) * self.preference_delta_scale
+
+  def forward_with_context(
+      self,
+      us: Tensor,
+      them: Tensor,
+      w_in: Tensor,
+      b_in: Tensor,
+      context_id: Tensor,
+  ) -> Tensor:
+    hidden = self._forward_hidden(us, them, w_in, b_in)
+    return self.output(hidden) + self._forward_context_delta(hidden, context_id)
 
   def _compute_lambda(self, ply: Tensor) -> Tensor | float:
     lambda_base = self.lambda_[0]
@@ -224,6 +389,11 @@ class NNUE(pl.LightningModule):
     return us, them, white, black, outcome, score, ply, aux_targets
 
   def step_(self, batch: Batch, batch_idx: int, loss_type: str) -> Tensor:
+    if isinstance(batch, dict):
+      if self.preference_route == "fixed_ref":
+        return self._step_fixed_ref(batch, loss_type)
+      raise ValueError("Dictionary batches require model.preference_route=fixed_ref")
+
     us, them, white, black, outcome, score, ply, aux_targets = self._unpack_batch(batch)
     # 600 is the kPonanzaConstant scaling factor needed to convert the training net output to a score.
     # This needs to match the value used in the serializer
@@ -249,6 +419,140 @@ class NNUE(pl.LightningModule):
       self.log(f"{loss_type}_king_zone_aux", king_zone_aux_loss.mean())
     if self.major_safety_aux_weight > 0.0 and aux_targets is not None:
       self.log(f"{loss_type}_major_safety_aux", major_safety_aux_loss.mean())
+    return loss
+
+  def _ensure_fixed_ref_state(self) -> None:
+    if self._fixed_ref_state:
+      return
+    self._fixed_ref_state = {
+        key: value.detach().clone()
+        for key, value in self.state_dict().items()
+        if torch.is_floating_point(value)
+    }
+
+  def _make_sparse_tensors_from_fens(
+      self,
+      fens: list[str],
+      plies: list[int],
+      device: torch.device,
+  ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    scores = [0 for _ in fens]
+    results = [0 for _ in fens]
+    batch = nnue_dataset.make_sparse_batch_from_fens(self.feature_set, fens, scores, plies, results)
+    try:
+      us, them, white, black, _outcome, _score, _ply = batch.contents.get_tensors(device)
+    finally:
+      nnue_dataset.destroy_sparse_batch(batch)
+    return us, them, white, black
+
+  def _fixed_ref_forward(self, us: Tensor, them: Tensor, white: Tensor, black: Tensor) -> Tensor:
+    self._ensure_fixed_ref_state()
+    state = {
+        key: value.to(device=us.device, dtype=value.dtype)
+        for key, value in self._fixed_ref_state.items()
+    }
+    return functional_call(self, state, (us, them, white, black))
+
+  def _score_fens_with_fixed_ref(
+      self,
+      fens: list[str],
+      plies: list[int],
+      device: torch.device,
+  ) -> Tensor:
+    if not fens:
+      return torch.empty(0, device=device)
+    us, them, white, black = self._make_sparse_tensors_from_fens(fens, plies, device)
+    with torch.no_grad():
+      q = self._fixed_ref_forward(us, them, white, black).reshape(-1)
+    return q
+
+  def _iter_candidate_after_fens(self, sfen: str, actual_move: int) -> list[tuple[int, str]]:
+    board = cshogi.Board(sfen)
+    candidates: list[tuple[int, str]] = []
+    for move in board.legal_moves:
+      move_int = int(move)
+      if move_int == int(actual_move):
+        continue
+      board.push(move_int)
+      candidates.append((move_int, board.sfen()))
+      board.pop()
+      if self.fixed_ref_max_legal_moves > 0 and len(candidates) >= self.fixed_ref_max_legal_moves:
+        break
+    return candidates
+
+  def _make_after_sfen(self, sfen: str, move: int) -> str | None:
+    board = cshogi.Board(sfen)
+    move_int = int(move)
+    if not board.is_legal(move_int):
+      return None
+    board.push(move_int)
+    return board.sfen()
+
+  def _build_fixed_ref_pairs(self, batch: dict[str, Any], device: torch.device) -> tuple[list[str], list[str], list[int], list[int]]:
+    actual_fens: list[str] = []
+    ref_fens: list[str] = []
+    pair_plies: list[int] = []
+    pair_context_ids: list[int] = []
+    sfens = batch["sfen"]
+    actual_moves = batch["actual_move"].detach().cpu().tolist()
+    plies = batch["ply"].reshape(-1).detach().cpu().int().tolist()
+    context_ids = batch["context_id"].detach().cpu().int().tolist()
+
+    for sfen, actual_move, ply, context_id in zip(sfens, actual_moves, plies, context_ids):
+      actual_after = self._make_after_sfen(sfen, int(actual_move))
+      if actual_after is None:
+        continue
+
+      candidates = self._iter_candidate_after_fens(sfen, int(actual_move))
+      if not candidates:
+        continue
+
+      candidate_fens = [candidate_sfen for _move, candidate_sfen in candidates]
+      candidate_plies = [int(ply) + 1 for _ in candidate_fens]
+      ref_scores = self._score_fens_with_fixed_ref(candidate_fens, candidate_plies, device)
+      # The network output is side-to-move oriented. After one move, the side to
+      # move is the opponent, so the original mover's utility is the negative score.
+      ref_utilities = -ref_scores
+      best_index = int(torch.argmax(ref_utilities).item())
+
+      actual_fens.append(actual_after)
+      ref_fens.append(candidate_fens[best_index])
+      pair_plies.append(int(ply) + 1)
+      pair_context_ids.append(int(context_id))
+
+    return actual_fens, ref_fens, pair_plies, pair_context_ids
+
+  def _score_fens_with_current_context(
+      self,
+      fens: list[str],
+      plies: list[int],
+      context_ids: list[int],
+      device: torch.device,
+  ) -> Tensor:
+    us, them, white, black = self._make_sparse_tensors_from_fens(fens, plies, device)
+    context_tensor = torch.tensor(context_ids, dtype=torch.long, device=device)
+    return self.forward_with_context(us, them, white, black, context_tensor).reshape(-1)
+
+  def _step_fixed_ref(self, batch: dict[str, Any], loss_type: str) -> Tensor:
+    param = next(self.parameters())
+    device = param.device
+    actual_fens, ref_fens, pair_plies, pair_context_ids = self._build_fixed_ref_pairs(batch, device)
+    if not actual_fens:
+      loss = param.sum() * 0.0
+      self.log(loss_type, loss)
+      self.log(f"{loss_type}_fixed_ref_pairs", 0.0)
+      return loss
+
+    actual_q = self._score_fens_with_current_context(actual_fens, pair_plies, pair_context_ids, device)
+    ref_q = self._score_fens_with_current_context(ref_fens, pair_plies, pair_context_ids, device)
+    actual_utility = -actual_q
+    ref_utility = -ref_q
+    logits = self.preference_beta * (actual_utility - ref_utility)
+    pref_loss = -F.logsigmoid(logits).mean()
+    loss = self.preference_weight * pref_loss
+    self.log(loss_type, loss)
+    self.log(f"{loss_type}_fixed_ref_pref", pref_loss)
+    self.log(f"{loss_type}_fixed_ref_pairs", float(len(actual_fens)))
     return loss
 
   def _iter_ema_parameters(self) -> Iterator[tuple[str, Tensor]]:

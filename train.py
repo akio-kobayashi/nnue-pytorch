@@ -1,6 +1,7 @@
 import model as M
 import nnue_dataset
 import nnue_bin_dataset
+import preference_dataset
 import pytorch_lightning as pl
 import features as features_module
 import torch
@@ -40,6 +41,8 @@ class NNUEDataModule(pl.LightningDataModule):
         py_data_sampling_bins: int = 8,
         py_data_sampling_max_positions: int = 0,
         py_data_sampling_seed: int = 42,
+        preference_data: bool = False,
+        preference_context_type: str = "elo",
         threads: int = -1,
     ) -> None:
         super().__init__()
@@ -63,7 +66,16 @@ class NNUEDataModule(pl.LightningDataModule):
             if self.trainer.strategy.root_device.type == "cuda":
                 main_device = f"cuda:{self.trainer.strategy.root_device.index}"
 
-        if self.hparams.py_data:
+        if self.hparams.preference_data:
+            self.train_ds = preference_dataset.FixedRefH5Dataset(
+                self.hparams.train,
+                context_type=self.hparams.preference_context_type,
+            )
+            self.val_ds = preference_dataset.FixedRefH5Dataset(
+                self.hparams.val,
+                context_type=self.hparams.preference_context_type,
+            )
+        elif self.hparams.py_data:
             self.train_ds = nnue_bin_dataset.NNUEBinData(self.hparams.train, self.feature_set)
             self.val_ds = nnue_bin_dataset.NNUEBinData(self.hparams.val, self.feature_set)
         else:
@@ -95,6 +107,14 @@ class NNUEDataModule(pl.LightningDataModule):
             )
 
     def train_dataloader(self) -> DataLoader:
+        if self.hparams.preference_data:
+            return DataLoader(
+                self.train_ds,
+                batch_size=self.hparams.batch_size,
+                shuffle=True,
+                num_workers=self.hparams.py_data_train_num_workers,
+                collate_fn=preference_dataset.collate_fixed_ref_samples,
+            )
         if self.hparams.py_data:
             sampler = nnue_bin_dataset.create_sampling_strategy(
                 self.train_ds,
@@ -119,6 +139,13 @@ class NNUEDataModule(pl.LightningDataModule):
         return DataLoader(self.train_ds, batch_size=None, batch_sampler=None)
 
     def val_dataloader(self) -> DataLoader:
+        if self.hparams.preference_data:
+            return DataLoader(
+                self.val_ds,
+                batch_size=self.hparams.py_data_val_batch_size,
+                num_workers=0,
+                collate_fn=preference_dataset.collate_fixed_ref_samples,
+            )
         if self.hparams.py_data:
             return DataLoader(self.val_ds, batch_size=self.hparams.py_data_val_batch_size)
         return DataLoader(self.val_ds, batch_size=None, batch_sampler=None)

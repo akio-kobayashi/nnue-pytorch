@@ -345,6 +345,58 @@ elo preference loss:
 - route B を Elo 条件のみで先行実装できる
 - route A と route B の比較実験が可能になる
 
+### Slice A5: Matrix LoRA baseline
+
+目的:
+
+- fixed-reference route の最初の低ランク差分学習として matrix LoRA を使う
+
+定義:
+
+- `W_eff = W0 + (alpha / r) B A`
+- 適用先は feature transformer input weight を基本とする
+- `freeze_base_input = true` により `W0` を保ち、adapter のみを主に学習する
+
+完了条件:
+
+- `input_adapter = halfkp_lora` で学習できる
+- export 時に `W_eff` を static NNUE の feature transformer weight へ畳み込める
+
+### Slice A6: Deferred tensor-factorized adapters
+
+目的:
+
+- HalfKP の `king square x piece plane` 構造を使った tensor-factorized adapter を後続実験として導入する
+
+候補:
+
+- `input_adapter = halfkp_tensor_cp`
+- `input_adapter = halfkp_tensor_tucker`
+- context-conditioned tensor adapter
+
+制約:
+
+- 現行 fixed-ref の有効性確認後に実装する
+- matrix LoRA と同じ `input_adapter` 切替で比較可能にする
+- export 時に dense `W_eff` へ畳み込めることを必須条件とする
+
+CP 分解案:
+
+- `DeltaW[o,k,p] = sum_r A[o,r] B[k,r] C[p,r]`
+
+context-conditioned 案:
+
+- `DeltaW_c[o,k,p] = sum_r g_r(c) A[o,r] B[k,r] C[p,r]`
+
+export 案:
+
+- 条件なし export:
+  - `W0 + average(DeltaW_c)`
+- 条件固定 export:
+  - `W0 + DeltaW_c`
+- 蒸留 export:
+  - 条件付きモデルの出力を static NNUE に蒸留する
+
 ## Evaluation
 
 評価はミクロ評価とマクロ評価の 2 段で行う。

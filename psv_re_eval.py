@@ -49,7 +49,23 @@ def resolve_model_args(args, checkpoint):
   resolved_l1_size = args.l1_size or hyper_parameters.get("l1_size", inferred_args["l1_size"])
   resolved_l2_size = args.l2_size or hyper_parameters.get("l2_size", inferred_args["l2_size"])
   resolved_l3_size = args.l3_size or hyper_parameters.get("l3_size", inferred_args["l3_size"])
-  return resolved_features, resolved_l1_size, resolved_l2_size, resolved_l3_size
+  inferred_input_adapter = inferred_args.get("input_adapter", "none")
+  resolved_input_adapter = hyper_parameters.get("input_adapter", inferred_input_adapter)
+  if resolved_input_adapter == "none" and inferred_input_adapter != "none":
+    resolved_input_adapter = inferred_input_adapter
+  resolved_input_adapter_rank = hyper_parameters.get("input_adapter_rank", inferred_args.get("input_adapter_rank", 8))
+  resolved_input_adapter_alpha = hyper_parameters.get("input_adapter_alpha", 1.0)
+  resolved_input_adapter_init_std = hyper_parameters.get("input_adapter_init_std", 0.0)
+  return (
+      resolved_features,
+      resolved_l1_size,
+      resolved_l2_size,
+      resolved_l3_size,
+      resolved_input_adapter,
+      resolved_input_adapter_rank,
+      resolved_input_adapter_alpha,
+      resolved_input_adapter_init_std,
+  )
 
 
 def normalize_model_for_serialize_inference(model):
@@ -65,16 +81,31 @@ def normalize_model_for_serialize_inference(model):
 
 def load_model(args):
   checkpoint = torch.load(args.checkpoint, map_location="cpu")
-  resolved_features, resolved_l1_size, resolved_l2_size, resolved_l3_size = resolve_model_args(args, checkpoint)
+  (
+      resolved_features,
+      resolved_l1_size,
+      resolved_l2_size,
+      resolved_l3_size,
+      resolved_input_adapter,
+      resolved_input_adapter_rank,
+      resolved_input_adapter_alpha,
+      resolved_input_adapter_init_std,
+  ) = resolve_model_args(args, checkpoint)
   nnue = M.NNUE(
       features=resolved_features,
       l1_size=resolved_l1_size,
       l2_size=resolved_l2_size,
       l3_size=resolved_l3_size,
+      input_adapter=resolved_input_adapter,
+      input_adapter_rank=resolved_input_adapter_rank,
+      input_adapter_alpha=resolved_input_adapter_alpha,
+      input_adapter_init_std=resolved_input_adapter_init_std,
   )
   state_dict = checkpoint["state_dict"]
   if hasattr(serialize, "_upgrade_legacy_state_dict"):
     state_dict = serialize._upgrade_legacy_state_dict(state_dict, resolved_features)
+  if hasattr(serialize, "_strip_non_serializable_state_dict_keys"):
+    state_dict = serialize._strip_non_serializable_state_dict_keys(state_dict)
   nnue.load_state_dict(state_dict)
   serialize._load_checkpoint_extras(nnue, checkpoint)
   if args.use_ema and hasattr(nnue, "apply_ema_weights"):
@@ -91,6 +122,7 @@ def load_model(args):
       f"l1={resolved_l1_size}",
       f"l2={resolved_l2_size}",
       f"l3={resolved_l3_size}",
+      f"input_adapter={resolved_input_adapter}",
       f"use_ema={args.use_ema}",
       f"serialize_normalize={args.serialize_normalize}",
       f"fv_scale={args.fv_scale}",

@@ -53,6 +53,14 @@ def _decode_position_sfen(record: np.void) -> str:
   return board.sfen()
 
 
+def _attr_to_str(value: Any, default: str = "unknown") -> str:
+  if value is None:
+    return default
+  if isinstance(value, bytes):
+    return value.decode("utf-8", errors="replace")
+  return str(value)
+
+
 class FixedRefH5Dataset(Dataset):
   """
   HDF5 decision-point dataset for the fixed-reference preference route.
@@ -76,7 +84,7 @@ class FixedRefH5Dataset(Dataset):
     self.elo_bucket_edges = tuple(int(v) for v in elo_bucket_edges)
     self._h5: h5py.File | None = None
     self._index = self._build_index()
-    self._player_to_id: dict[str, int] = {}
+    self._player_to_id = self._build_player_vocab()
 
   def _build_index(self) -> list[tuple[str, int]]:
     index: list[tuple[str, int]] = []
@@ -89,6 +97,17 @@ class FixedRefH5Dataset(Dataset):
           index.append((game_name, pos_idx))
     return index
 
+  def _build_player_vocab(self) -> dict[str, int]:
+    players: set[str] = set()
+    with h5py.File(self.h5_path, "r") as h5_file:
+      for game_name in sorted(h5_file.keys()):
+        attrs = h5_file[game_name].attrs
+        black = _attr_to_str(attrs.get("black_player", attrs.get("player_b")))
+        white = _attr_to_str(attrs.get("white_player", attrs.get("player_w")))
+        players.add(black)
+        players.add(white)
+    return {player: idx for idx, player in enumerate(sorted(players))}
+
   def _ensure_open(self) -> h5py.File:
     if self._h5 is None:
       self._h5 = h5py.File(self.h5_path, "r")
@@ -100,12 +119,11 @@ class FixedRefH5Dataset(Dataset):
   def _resolve_player_context(self, attrs: h5py.AttributeManager, turn: int) -> ContextValue:
     player_key = "black_player" if turn == cshogi.BLACK else "white_player"
     fallback_key = "player_b" if turn == cshogi.BLACK else "player_w"
-    player_name = str(attrs.get(player_key, attrs.get(fallback_key, "unknown")))
-    if player_name not in self._player_to_id:
-      self._player_to_id[player_name] = len(self._player_to_id)
+    player_name = _attr_to_str(attrs.get(player_key, attrs.get(fallback_key)))
+    context_id = self._player_to_id.get(player_name, self._player_to_id.get("unknown", 0))
     return ContextValue(
         context_type="player",
-        context_id=self._player_to_id[player_name],
+        context_id=context_id,
         context_label=player_name,
     )
 
@@ -136,7 +154,7 @@ class FixedRefH5Dataset(Dataset):
     game_result = int(group.attrs.get("game_result", 0))
     metadata = {
         "game_name": game_name,
-        "file_path": str(group.attrs.get("file_path", "")),
+        "file_path": _attr_to_str(group.attrs.get("file_path"), default=""),
         "kif_index": int(group.attrs.get("kif_index", 0)),
         "rating_b": group.attrs.get("rating_b"),
         "rating_w": group.attrs.get("rating_w"),

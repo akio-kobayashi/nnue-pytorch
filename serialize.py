@@ -38,12 +38,16 @@ def _infer_features_from_input_dim(input_dim: int) -> str:
 
 
 def _infer_model_args_from_state_dict(state_dict):
-  return {
+  inferred = {
       "features": _infer_features_from_input_dim(state_dict["input.weight"].shape[1]),
       "l1_size": int(state_dict["input.weight"].shape[0]),
       "l2_size": int(state_dict["l1.weight"].shape[0]),
       "l3_size": int(state_dict["l2.weight"].shape[0]),
   }
+  if "input_lora_a" in state_dict and "input_lora_b" in state_dict:
+    inferred["input_adapter"] = "halfkp_lora"
+    inferred["input_adapter_rank"] = int(state_dict["input_lora_a"].shape[0])
+  return inferred
 
 
 def _load_checkpoint_extras(model, checkpoint):
@@ -51,6 +55,29 @@ def _load_checkpoint_extras(model, checkpoint):
   # when loading a raw .ckpt for export.
   if hasattr(model, "on_load_checkpoint"):
     model.on_load_checkpoint(checkpoint)
+
+
+def _strip_non_serializable_state_dict_keys(state_dict):
+  """
+  Return the static-NNUE subset of a training checkpoint state dict.
+
+  Conditional preference experiments may add training-only parameters such as
+  context embeddings. Those parameters cannot be represented in a conventional
+  YaneuraOu-compatible nn.bin, so export intentionally drops them.
+  """
+  prefixes_to_drop = ("context_embedding.",)
+  stripped = {
+      key: value
+      for key, value in state_dict.items()
+      if not key.startswith(prefixes_to_drop)
+  }
+  dropped = sorted(set(state_dict) - set(stripped))
+  if dropped:
+    print(
+        "Dropping non-serializable checkpoint keys for static NNUE export:",
+        ", ".join(dropped),
+    )
+  return stripped
 
 
 def _canonical_feature_name(feature_set_name: str) -> str:
@@ -126,7 +153,10 @@ class NNUEWriter():
     self.buf.extend(description)
 
   def coalesce_ft_weights(self, model, layer):
-    weight = layer.weight.data
+    if hasattr(model, "get_effective_input_weight"):
+      weight = model.get_effective_input_weight().detach()
+    else:
+      weight = layer.weight.data
     indices = model.feature_set.get_virtual_to_real_features_gather_indices()
     weight_coalesced = weight.new_zeros((weight.shape[0], model.feature_set.num_real_features))
     for i_real, is_virtual in enumerate(indices):
@@ -182,7 +212,10 @@ class NNUEWriter():
     # int16 bias = round(x * 127)
     # int16 weight = round(x * 127)
     layer = model.input
-    bias = layer.bias.data
+    if hasattr(model, "get_effective_input_bias"):
+      bias = model.get_effective_input_bias().detach()
+    else:
+      bias = layer.bias.data
     bias = self.stochastic_round_cpp(bias * 127).to(torch.int16)
     ascii_hist('ft bias:', bias.numpy())
     self.save_histogram(f'{self.figure_index:02}_feature_transformer_bias.png', bias, 'bias', 'frequency', 'feature transformer bias')
@@ -321,7 +354,23 @@ def main():
     resolved_l1_size = args.l1_size if args.l1_size is not None else hparams.get("l1_size", inferred.get("l1_size", default_l1_size))
     resolved_l2_size = args.l2_size if args.l2_size is not None else hparams.get("l2_size", inferred.get("l2_size", default_l2_size))
     resolved_l3_size = args.l3_size if args.l3_size is not None else hparams.get("l3_size", inferred.get("l3_size", default_l3_size))
-    return resolved_features, resolved_l1_size, resolved_l2_size, resolved_l3_size
+    inferred_input_adapter = inferred.get("input_adapter", "none")
+    resolved_input_adapter = hparams.get("input_adapter", inferred_input_adapter)
+    if resolved_input_adapter == "none" and inferred_input_adapter != "none":
+      resolved_input_adapter = inferred_input_adapter
+    resolved_input_adapter_rank = hparams.get("input_adapter_rank", inferred.get("input_adapter_rank", 8))
+    resolved_input_adapter_alpha = hparams.get("input_adapter_alpha", 1.0)
+    resolved_input_adapter_init_std = hparams.get("input_adapter_init_std", 0.0)
+    return (
+        resolved_features,
+        resolved_l1_size,
+        resolved_l2_size,
+        resolved_l3_size,
+        resolved_input_adapter,
+        resolved_input_adapter_rank,
+        resolved_input_adapter_alpha,
+        resolved_input_adapter_init_std,
+    )
 
   print('Converting %s to %s' % (args.source, args.target))
 
@@ -334,14 +383,28 @@ def main():
       checkpoint = torch.load(args.source, map_location="cpu")
       hyper_parameters = checkpoint.get("hyper_parameters", {})
       inferred_args = _infer_model_args_from_state_dict(checkpoint["state_dict"])
-      resolved_features, resolved_l1_size, resolved_l2_size, resolved_l3_size = resolve_model_args(hyper_parameters, inferred_args)
+      (
+          resolved_features,
+          resolved_l1_size,
+          resolved_l2_size,
+          resolved_l3_size,
+          resolved_input_adapter,
+          resolved_input_adapter_rank,
+          resolved_input_adapter_alpha,
+          resolved_input_adapter_init_std,
+      ) = resolve_model_args(hyper_parameters, inferred_args)
       nnue = M.NNUE(
           features=resolved_features,
           l1_size=resolved_l1_size,
           l2_size=resolved_l2_size,
           l3_size=resolved_l3_size,
+          input_adapter=resolved_input_adapter,
+          input_adapter_rank=resolved_input_adapter_rank,
+          input_adapter_alpha=resolved_input_adapter_alpha,
+          input_adapter_init_std=resolved_input_adapter_init_std,
       )
-      nnue.load_state_dict(checkpoint["state_dict"])
+      export_state_dict = _strip_non_serializable_state_dict_keys(checkpoint["state_dict"])
+      nnue.load_state_dict(export_state_dict)
       _load_checkpoint_extras(nnue, checkpoint)
     if args.use_ema and hasattr(nnue, "apply_ema_weights"):
       if not nnue.apply_ema_weights():
@@ -354,7 +417,7 @@ def main():
   elif args.source.endswith(".bin"):
     if not args.target.endswith(".pt"):
       raise Exception("Target file must end with .pt")
-    resolved_features, resolved_l1_size, resolved_l2_size, resolved_l3_size = resolve_model_args()
+    resolved_features, resolved_l1_size, resolved_l2_size, resolved_l3_size, *_ = resolve_model_args()
     feature_set = features.get_feature_set_from_name(resolved_features)
     with open(args.source, 'rb') as f:
       reader = NNUEReader(
