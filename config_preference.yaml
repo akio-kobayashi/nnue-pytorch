@@ -1,0 +1,45 @@
+data:
+  train: /path/to/train.h5
+  val: /path/to/val.h5
+  features: HalfKP
+  num_workers: 4
+  batch_size: 256
+  epoch_size: 10000000
+  validation_size: 1000000
+  preference_data: true
+  preference_context_type: elo
+  py_data_train_num_workers: 4
+  py_data_val_batch_size: 32
+model:
+  features: HalfKP
+  l1_size: 1024
+  l2_size: 8
+  l3_size: 96
+  input_adapter: halfkp_lora
+  input_adapter_rank: 8
+  input_adapter_alpha: 1.0
+  input_adapter_init_std: 1.0e-3
+  freeze_base_input: false
+  base_ckpt: /path/to/base_model.ckpt
+  use_ema_weights: true
+  ema_enabled: true
+  ema_decay: 0.9995
+  ema_update_every: 1
+  ema_start_step: 1000
+  preference_route: fixed_ref
+  preference_weight: 1.0
+  preference_beta: 1.0
+  preference_num_contexts: 8
+  fixed_ref_max_legal_moves: 0
+  preference_delta_scale: 1.0
+  lr: [1.0e-3]
+  lambda_: [1.0]
+  num_batches_warmup: 10000
+  score_scaling: 361.0
+  momentum: 0.0
+  outcome_pos_weight: 1.0
+trainer:
+  devices: 1
+  precision: 32
+  max_epochs: 100
+  strategy: ddp
