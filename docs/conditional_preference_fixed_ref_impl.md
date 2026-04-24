@@ -47,47 +47,46 @@ Elo と player を共通化するため、dataset は以下の形で sample を�
 
 ## Route boundary
 
-fixed-ref route の責務を先に固定する。
+fixed-ref route の責務を更新する。
 
 - dataset:
   - `psv` とメタを読む
   - `actual_move` と context を返す
+  - Elo に基づく学習重み `sample_weight` を計算する
 - collate / batch builder:
   - 現局面の合法手を列挙する
   - `V0` で候補手を選ぶ
   - pairwise 学習に必要な `actual` / `ref` 遷移先を構成する
 - model:
-  - `V(s, c) = V0(s) + Delta(s, c)` を学習する
+  - 最下層 (FT) に Elo 条件付き LoRA アダプタを適用する
+  - 損失計算時に `sample_weight` による加重平均を行う
+  - `V(s, c) = (W0 + DeltaW_c) * x + b` を学習する
 
 ## First code slice
 
-最初のコードスライスでは、まだ `V0` 候補選別までは入れない。
-先に次を成立させる。
+最初のコードスライスでは、基盤となるデータ構造と LoRA の条件付き化を成立させる。
 
-1. HDF5 を index 化して decision point を返せる
-2. Elo / player の両方を同じ sample schema で返せる
-3. 学習時に必要な最小メタを失わない
+1. HDF5 から Elo 加重を計算して返せる
+2. モデルの入力層 LoRA が `context_id` (Eloバケット) に依存して切り替わる
+3. 損失計算が `sample_weight` を受け取れる
 
 ## Next slices
 
-### Slice F1
+### Slice F1: Weighted Dataset
 
-- HDF5 fixed-ref dataset の追加
-- lazy-open
-- `context_type` 切替
-- Elo bucket 化
+- HDF5 fixed-ref dataset への `sample_weight` 計算ロジック追加
+- Elo レーティングから 0.0〜1.0 程度の重みへのマッピング
 
-### Slice F2
+### Slice F2: Context-conditioned Input LoRA
 
-- fixed-ref collate / batch builder
-- `V0` 推論用の current / actual / candidate SFEN 構成
-- DataModule では `preference_data=true` のとき HDF5 decision-point dataset を使う
-- Model では `preference_route=fixed_ref` のとき dict batch を受けて pairwise loss を計算する
+- `model.input_lora_a` / `b` を `nn.Embedding` 化
+- `_forward_hidden` での `context_id` を用いた動的な LoRA 適用
+- バッチ内での効率的なアダプタ計算ロジック
 
-### Slice F3
+### Slice F3: Weighted Preference Loss
 
-- model 側に route-gated preference loss を追加
-- Elo 条件を先に通す
+- `_step_fixed_ref` での加重損失計算の実装
+- `V0` 推論用の current / actual / candidate SFEN 構成と統合
 
 ### Slice F4
 

@@ -28,6 +28,7 @@ class FixedRefSample:
   ply: int
   game_result: int
   context: ContextValue
+  sample_weight: float
   metadata: dict[str, Any]
 
 
@@ -75,6 +76,9 @@ class FixedRefH5Dataset(Dataset):
       h5_path: str | Path,
       context_type: str = "elo",
       elo_bucket_edges: tuple[int, ...] = DEFAULT_ELO_BUCKETS,
+      elo_weight_slope: float = 0.001,
+      elo_weight_intercept: float = 0.5,
+      elo_weight_min: float = 0.1,
   ) -> None:
     super().__init__()
     if context_type not in {"elo", "player"}:
@@ -82,6 +86,9 @@ class FixedRefH5Dataset(Dataset):
     self.h5_path = str(h5_path)
     self.context_type = context_type
     self.elo_bucket_edges = tuple(int(v) for v in elo_bucket_edges)
+    self.elo_weight_slope = float(elo_weight_slope)
+    self.elo_weight_intercept = float(elo_weight_intercept)
+    self.elo_weight_min = float(elo_weight_min)
     self._h5: h5py.File | None = None
     self._index = self._build_index()
     self._player_to_id = self._build_player_vocab()
@@ -152,6 +159,19 @@ class FixedRefH5Dataset(Dataset):
     sfen = _decode_position_sfen(position)
     context = self._resolve_context(group.attrs, sfen)
     game_result = int(group.attrs.get("game_result", 0))
+
+    # Calculate weight based on Elo.
+    board = cshogi.Board(sfen)
+    elo_key = "rating_b" if board.turn == cshogi.BLACK else "rating_w"
+    elo_value = group.attrs.get(elo_key)
+    if elo_value is not None:
+      sample_weight = max(
+          self.elo_weight_min,
+          self.elo_weight_slope * (float(elo_value) - 1500.0) + self.elo_weight_intercept
+      )
+    else:
+      sample_weight = self.elo_weight_intercept
+
     metadata = {
         "game_name": game_name,
         "file_path": _attr_to_str(group.attrs.get("file_path"), default=""),
@@ -165,6 +185,7 @@ class FixedRefH5Dataset(Dataset):
         ply=int(position["ply"]),
         game_result=game_result,
         context=context,
+        sample_weight=float(sample_weight),
         metadata=metadata,
     )
 
@@ -194,6 +215,7 @@ def collate_fixed_ref_samples(samples: list[FixedRefSample]) -> dict[str, Any]:
       "ply": torch.tensor([sample.ply for sample in samples], dtype=torch.float32).unsqueeze(1),
       "game_result": torch.tensor([sample.game_result for sample in samples], dtype=torch.int64),
       "context_id": torch.tensor([sample.context.context_id for sample in samples], dtype=torch.int64),
+      "weight": torch.tensor([sample.sample_weight for sample in samples], dtype=torch.float32),
       "context_type": [sample.context.context_type for sample in samples],
       "context_label": [sample.context.context_label for sample in samples],
       "metadata": [sample.metadata for sample in samples],

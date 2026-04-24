@@ -1,45 +1,54 @@
-data:
-  train: /path/to/train.h5
-  val: /path/to/val.h5
-  features: HalfKP
-  num_workers: 4
-  batch_size: 256
-  epoch_size: 10000000
-  validation_size: 1000000
-  preference_data: true
-  preference_context_type: elo
-  py_data_train_num_workers: 4
-  py_data_val_batch_size: 32
+# Example configuration for Conditional Preference Learning with Elo-weighted Loss
+# This configures a fixed-reference preference route with conditional LoRA at the input layer.
+
+seed_everything: 42
+
 model:
-  features: HalfKP
-  l1_size: 1024
-  l2_size: 8
-  l3_size: 96
-  input_adapter: halfkp_lora
+  features: "HalfKP"
+  # Preference Learning settings
+  preference_route: "fixed_ref"
+  preference_weight: 1.0
+  preference_beta: 1.0           # Scaling for Bradley-Terry logits
+  preference_num_contexts: 5     # Should be len(elo_bucket_edges) + 1
+  
+  # Conditional LoRA at the input layer (Feature Transformer)
+  input_adapter: "halfkp_lora"
   input_adapter_rank: 8
   input_adapter_alpha: 1.0
-  input_adapter_init_std: 1.0e-3
-  freeze_base_input: false
-  base_ckpt: /path/to/base_model.ckpt
-  use_ema_weights: true
-  ema_enabled: true
-  ema_decay: 0.9995
-  ema_update_every: 1
-  ema_start_step: 1000
-  preference_route: fixed_ref
-  preference_weight: 1.0
-  preference_beta: 1.0
-  preference_num_contexts: 8
-  fixed_ref_max_legal_moves: 0
-  preference_delta_scale: 1.0
-  lr: [1.0e-3]
-  lambda_: [1.0]
-  num_batches_warmup: 10000
-  score_scaling: 361.0
-  momentum: 0.0
-  outcome_pos_weight: 1.0
+  input_adapter_init_std: 1e-4
+  freeze_base_input: true        # Freeze the main FT weights, train only adapters
+  
+  # Base model to initialize from
+  base_ckpt: "eval/nn.bin"        # Path to pretrained model or .nnue
+
+data:
+  features: "HalfKP"
+  train: "data/train_preferences.h5"
+  val: "data/val_preferences.h5"
+  batch_size: 128
+  
+  # Preference Dataset settings
+  preference_data: true
+  preference_context_type: "elo"
+  
+  # Elo Bucket definition: boundaries for context_id assignment
+  # Buckets: <1200, 1200-1600, 1600-2000, 2000-2400, >2400
+  elo_bucket_edges: [1200, 1600, 2000, 2400]
+  
+  # Loss Weighting based on Elo: weight = slope * (elo - 1500) + intercept
+  # This makes higher Elo samples contribute more to the gradient.
+  elo_weight_slope: 0.001        # Increase weight by 0.1 per 100 Elo
+  elo_weight_intercept: 0.5      # Weight at 1500 Elo
+  elo_weight_min: 0.1            # Minimum weight floor
+
 trainer:
+  max_epochs: 10
+  accelerator: "auto"
   devices: 1
   precision: 32
-  max_epochs: 100
-  strategy: ddp
+  callbacks:
+    - class_path: pytorch_lightning.callbacks.ModelCheckpoint
+      init_args:
+        monitor: "val_loss"
+        save_top_k: 3
+        mode: "min"

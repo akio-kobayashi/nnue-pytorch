@@ -43,6 +43,10 @@ class NNUEDataModule(pl.LightningDataModule):
         py_data_sampling_seed: int = 42,
         preference_data: bool = False,
         preference_context_type: str = "elo",
+        elo_bucket_edges: tuple[int, ...] = (1200, 1600, 2000, 2400),
+        elo_weight_slope: float = 0.001,
+        elo_weight_intercept: float = 0.5,
+        elo_weight_min: float = 0.1,
         threads: int = -1,
     ) -> None:
         super().__init__()
@@ -70,10 +74,18 @@ class NNUEDataModule(pl.LightningDataModule):
             self.train_ds = preference_dataset.FixedRefH5Dataset(
                 self.hparams.train,
                 context_type=self.hparams.preference_context_type,
+                elo_bucket_edges=self.hparams.elo_bucket_edges,
+                elo_weight_slope=self.hparams.elo_weight_slope,
+                elo_weight_intercept=self.hparams.elo_weight_intercept,
+                elo_weight_min=self.hparams.elo_weight_min,
             )
             self.val_ds = preference_dataset.FixedRefH5Dataset(
                 self.hparams.val,
                 context_type=self.hparams.preference_context_type,
+                elo_bucket_edges=self.hparams.elo_bucket_edges,
+                elo_weight_slope=self.hparams.elo_weight_slope,
+                elo_weight_intercept=self.hparams.elo_weight_intercept,
+                elo_weight_min=self.hparams.elo_weight_min,
             )
         elif self.hparams.py_data:
             self.train_ds = nnue_bin_dataset.NNUEBinData(self.hparams.train, self.feature_set)

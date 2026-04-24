@@ -189,25 +189,36 @@ class NNUE(pl.LightningModule):
     if adapter == "halfkp_lora":
       in_features = self.input.in_features
       out_features = self.input.out_features
-      a = self.input.weight.new_zeros((self.input_adapter_rank, in_features))
-      b = self.input.weight.new_zeros((out_features, self.input_adapter_rank))
+      # Each context (Elo bucket) has its own low-rank adapter.
+      self.input_lora_a = nn.Embedding(self.preference_num_contexts, self.input_adapter_rank * in_features)
+      self.input_lora_b = nn.Embedding(self.preference_num_contexts, out_features * self.input_adapter_rank)
+      
       if self.input_adapter_init_std > 0.0:
-        nn.init.normal_(a, mean=0.0, std=self.input_adapter_init_std)
-      self.input_lora_a = nn.Parameter(a)
-      self.input_lora_b = nn.Parameter(b)
+        nn.init.normal_(self.input_lora_a.weight, mean=0.0, std=self.input_adapter_init_std)
+        nn.init.normal_(self.input_lora_b.weight, mean=0.0, std=self.input_adapter_init_std)
+      else:
+        nn.init.zeros_(self.input_lora_a.weight)
+        nn.init.zeros_(self.input_lora_b.weight)
 
     self._set_base_input_trainable(not self.freeze_base_input)
 
-  def get_effective_input_weight(self) -> Tensor:
+  def get_effective_input_weight(self, context_id: Tensor | None = None) -> Tensor:
     weight = self.input.weight
     if self.input_adapter == "halfkp_lora":
-      if self.input_lora_a is None or self.input_lora_b is None:
+      if self.input_lora_a is None or self.input_lora_b is None or context_id is None:
         return weight
-      scale = self.input_adapter_alpha / float(self.input_adapter_rank)
-      return weight + scale * (self.input_lora_b @ self.input_lora_a)
+      
+      # For a single context_id (e.g. during inference or conditioned export)
+      if context_id.dim() == 0 or (context_id.dim() == 1 and context_id.shape[0] == 1):
+        cid = context_id.reshape(-1)[0]
+        a = self.input_lora_a(cid).reshape(self.input_adapter_rank, -1)
+        b = self.input_lora_b(cid).reshape(-1, self.input_adapter_rank)
+        scale = self.input_adapter_alpha / float(self.input_adapter_rank)
+        return weight + scale * (b @ a)
+
     return weight
 
-  def get_effective_input_bias(self) -> Tensor:
+  def get_effective_input_bias(self, context_id: Tensor | None = None) -> Tensor:
     return self.input.bias
 
   '''
@@ -273,11 +284,44 @@ class NNUE(pl.LightningModule):
     else:
       raise Exception('Cannot change feature set from {} to {}.'.format(self.feature_set.name, new_feature_set.name))
 
-  def _forward_hidden(self, us: Tensor, them: Tensor, w_in: Tensor, b_in: Tensor) -> Tensor:
-    effective_weight = self.get_effective_input_weight()
-    effective_bias = self.get_effective_input_bias()
-    w = F.linear(w_in, effective_weight, effective_bias)
-    b = F.linear(b_in, effective_weight, effective_bias)
+  def _apply_input_adapter(self, x: Tensor, context_id: Tensor | None) -> Tensor:
+    if self.input_adapter == "none" or self.input_lora_a is None or self.input_lora_b is None or context_id is None:
+      return x.new_zeros((x.shape[0], self.input.out_features))
+    
+    # x: [batch, in_features]
+    # context_id: [batch]
+    batch_size = x.shape[0]
+    a = self.input_lora_a(context_id).reshape(batch_size, self.input_adapter_rank, -1)
+    b = self.input_lora_b(context_id).reshape(batch_size, -1, self.input_adapter_rank)
+    
+    # Result = scale * (x @ A.T @ B.T)
+    # x @ A.T: [batch, 1, in_features] @ [batch, in_features, rank] -> [batch, 1, rank]
+    res_a = torch.bmm(x.unsqueeze(1), a.transpose(1, 2))
+    # res_a @ B.T: [batch, 1, rank] @ [batch, rank, out_features] -> [batch, 1, out_features]
+    res_b = torch.bmm(res_a, b.transpose(1, 2))
+    
+    scale = self.input_adapter_alpha / float(self.input_adapter_rank)
+    return res_b.squeeze(1) * scale
+
+  def _forward_hidden(
+      self,
+      us: Tensor,
+      them: Tensor,
+      w_in: Tensor,
+      b_in: Tensor,
+      context_id: Tensor | None = None,
+  ) -> Tensor:
+    # Base linear pass
+    w_base = F.linear(w_in, self.input.weight, self.input.bias)
+    b_base = F.linear(b_in, self.input.weight, self.input.bias)
+    
+    # Context-conditioned LoRA pass
+    w_adapter = self._apply_input_adapter(w_in, context_id)
+    b_adapter = self._apply_input_adapter(b_in, context_id)
+    
+    w = w_base + w_adapter
+    b = b_base + b_adapter
+    
     l0_ = (us * torch.cat([w, b], dim=1)) + (them * torch.cat([b, w], dim=1))
     # clamp here is used as a clipped relu to (0.0, 1.0)
     l0_ = torch.clamp(l0_, 0.0, 1.0)
@@ -288,19 +332,6 @@ class NNUE(pl.LightningModule):
   def forward(self, us: Tensor, them: Tensor, w_in: Tensor, b_in: Tensor) -> Tensor:
     return self.output(self._forward_hidden(us, them, w_in, b_in))
 
-  def _forward_context_delta(self, hidden: Tensor, context_id: Tensor) -> Tensor:
-    if self.context_embedding is None:
-      raise RuntimeError("context_embedding is only available for preference_route=fixed_ref")
-    if hidden.shape[0] != context_id.shape[0]:
-      raise ValueError("hidden and context_id batch sizes must match")
-    if torch.any(context_id < 0) or torch.any(context_id >= self.preference_num_contexts):
-      raise ValueError(
-          f"context_id is outside [0, {self.preference_num_contexts}); "
-          "increase model.preference_num_contexts"
-      )
-    embedding = self.context_embedding(context_id.to(device=hidden.device, dtype=torch.long))
-    return (hidden * embedding).sum(dim=1, keepdim=True) * self.preference_delta_scale
-
   def forward_with_context(
       self,
       us: Tensor,
@@ -309,8 +340,13 @@ class NNUE(pl.LightningModule):
       b_in: Tensor,
       context_id: Tensor,
   ) -> Tensor:
-    hidden = self._forward_hidden(us, them, w_in, b_in)
-    return self.output(hidden) + self._forward_context_delta(hidden, context_id)
+    hidden = self._forward_hidden(us, them, w_in, b_in, context_id=context_id)
+    # Output layer context delta is now optional/auxiliary since we have FT adapter.
+    # For now, we keep it as an additive term if context_embedding exists.
+    q = self.output(hidden)
+    if self.context_embedding is not None:
+      q = q + self._forward_context_delta(hidden, context_id)
+    return q
 
   def _compute_lambda(self, ply: Tensor) -> Tensor | float:
     lambda_base = self.lambda_[0]
@@ -488,17 +524,20 @@ class NNUE(pl.LightningModule):
     board.push(move_int)
     return board.sfen()
 
-  def _build_fixed_ref_pairs(self, batch: dict[str, Any], device: torch.device) -> tuple[list[str], list[str], list[int], list[int]]:
+  def _build_fixed_ref_pairs(self, batch: dict[str, Any], device: torch.device) -> tuple[list[str], list[str], list[int], list[int], Tensor]:
     actual_fens: list[str] = []
     ref_fens: list[str] = []
     pair_plies: list[int] = []
     pair_context_ids: list[int] = []
+    pair_weights: list[float] = []
+    
     sfens = batch["sfen"]
     actual_moves = batch["actual_move"].detach().cpu().tolist()
     plies = batch["ply"].reshape(-1).detach().cpu().int().tolist()
     context_ids = batch["context_id"].detach().cpu().int().tolist()
+    weights = batch["weight"].detach().cpu().tolist()
 
-    for sfen, actual_move, ply, context_id in zip(sfens, actual_moves, plies, context_ids):
+    for sfen, actual_move, ply, context_id, weight in zip(sfens, actual_moves, plies, context_ids, weights):
       actual_after = self._make_after_sfen(sfen, int(actual_move))
       if actual_after is None:
         continue
@@ -519,8 +558,9 @@ class NNUE(pl.LightningModule):
       ref_fens.append(candidate_fens[best_index])
       pair_plies.append(int(ply) + 1)
       pair_context_ids.append(int(context_id))
+      pair_weights.append(float(weight))
 
-    return actual_fens, ref_fens, pair_plies, pair_context_ids
+    return actual_fens, ref_fens, pair_plies, pair_context_ids, torch.tensor(pair_weights, device=device)
 
   def _score_fens_with_current_context(
       self,
@@ -533,10 +573,23 @@ class NNUE(pl.LightningModule):
     context_tensor = torch.tensor(context_ids, dtype=torch.long, device=device)
     return self.forward_with_context(us, them, white, black, context_tensor).reshape(-1)
 
+  def _forward_context_delta(self, hidden: Tensor, context_id: Tensor) -> Tensor:
+    if self.context_embedding is None:
+      raise RuntimeError("context_embedding is only available for preference_route=fixed_ref")
+    if hidden.shape[0] != context_id.shape[0]:
+      raise ValueError("hidden and context_id batch sizes must match")
+    if torch.any(context_id < 0) or torch.any(context_id >= self.preference_num_contexts):
+      raise ValueError(
+          f"context_id is outside [0, {self.preference_num_contexts}); "
+          "increase model.preference_num_contexts"
+      )
+    embedding = self.context_embedding(context_id.to(device=hidden.device, dtype=torch.long))
+    return (hidden * embedding).sum(dim=1, keepdim=True) * self.preference_delta_scale
+
   def _step_fixed_ref(self, batch: dict[str, Any], loss_type: str) -> Tensor:
     param = next(self.parameters())
     device = param.device
-    actual_fens, ref_fens, pair_plies, pair_context_ids = self._build_fixed_ref_pairs(batch, device)
+    actual_fens, ref_fens, pair_plies, pair_context_ids, weights = self._build_fixed_ref_pairs(batch, device)
     if not actual_fens:
       loss = param.sum() * 0.0
       self.log(loss_type, loss)
@@ -548,7 +601,11 @@ class NNUE(pl.LightningModule):
     actual_utility = -actual_q
     ref_utility = -ref_q
     logits = self.preference_beta * (actual_utility - ref_utility)
-    pref_loss = -F.logsigmoid(logits).mean()
+    
+    raw_loss = -F.logsigmoid(logits)
+    # Weighted average
+    pref_loss = (raw_loss * weights).sum() / (weights.sum() + self.EPSILON)
+
     loss = self.preference_weight * pref_loss
     self.log(loss_type, loss)
     self.log(f"{loss_type}_fixed_ref_pref", pref_loss)

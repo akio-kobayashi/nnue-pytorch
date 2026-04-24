@@ -108,13 +108,14 @@ class NNUEWriter():
   """
   All values are stored in little endian.
   """
-  def __init__(self, model, output_directory_path):
+  def __init__(self, model, output_directory_path, context_id=None):
     self.output_directory_path = output_directory_path
     if not self.output_directory_path:
       self.output_directory_path = '.'
     os.makedirs(self.output_directory_path, exist_ok=True)
     self.figure_index = 0
     self.buf = bytearray()
+    self.context_id = context_id
 
     fc_hash = self.fc_hash(model)
     self.write_header(model, fc_hash)
@@ -154,7 +155,11 @@ class NNUEWriter():
 
   def coalesce_ft_weights(self, model, layer):
     if hasattr(model, "get_effective_input_weight"):
-      weight = model.get_effective_input_weight().detach()
+      ctx_tensor = None
+      if self.context_id is not None:
+        ctx_tensor = torch.tensor(self.context_id, dtype=torch.long)
+        print(f"Merging adapter for context_id: {self.context_id}")
+      weight = model.get_effective_input_weight(context_id=ctx_tensor).detach()
     else:
       weight = layer.weight.data
     indices = model.feature_set.get_virtual_to_real_features_gather_indices()
@@ -340,6 +345,7 @@ def main():
   parser.add_argument("--l2_size", type=int, default=None)
   parser.add_argument("--l3_size", type=int, default=None)
   parser.add_argument("--use_ema", action="store_true", help="Use EMA weights when exporting from .pt/.ckpt")
+  parser.add_argument("--context_id", type=int, default=None, help="Merge specific adapter bucket (e.g. highest Elo)")
   args = parser.parse_args()
 
   default_features = "HalfKP^"
@@ -411,7 +417,7 @@ def main():
         raise RuntimeError("Requested --use_ema but no EMA weights were found in the source model/checkpoint.")
     nnue.cpu()
     nnue.eval()
-    writer = NNUEWriter(nnue, os.path.dirname(args.target))
+    writer = NNUEWriter(nnue, os.path.dirname(args.target), context_id=args.context_id)
     with open(args.target, 'wb') as f:
       f.write(writer.buf)
   elif args.source.endswith(".bin"):
