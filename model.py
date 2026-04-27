@@ -103,8 +103,8 @@ class NNUE(pl.LightningModule):
     self.input_adapter_alpha = float(input_adapter_alpha)
     self.input_adapter_init_std = max(float(input_adapter_init_std), 0.0)
     self.freeze_base_input = bool(freeze_base_input)
-    self.input_lora_a: nn.Parameter | None = None
-    self.input_lora_b: nn.Parameter | None = None
+    self.input_lora_a: nn.Module | None = None
+    self.input_lora_b: nn.Module | None = None
     self._fixed_ref_state: TensorDict = {}
 
     self._zero_virtual_feature_weights()
@@ -140,7 +140,7 @@ class NNUE(pl.LightningModule):
     if self.context_embedding is not None:
       allowed_missing.add("context_embedding.weight")
     if self.input_adapter == "halfkp_lora":
-      allowed_missing.update({"input_lora_a", "input_lora_b"})
+      allowed_missing.update({"input_lora_a.weight", "input_lora_b.weight"})
     unexpected = set(incompatible.unexpected_keys)
     missing = set(incompatible.missing_keys) - allowed_missing
     if unexpected or missing:
@@ -164,8 +164,12 @@ class NNUE(pl.LightningModule):
       self.input.bias.requires_grad = trainable
 
   def _clear_input_adapter_parameters(self) -> None:
-    self.register_parameter("input_lora_a", None)
-    self.register_parameter("input_lora_b", None)
+    for name in ["input_lora_a", "input_lora_b"]:
+      if name in self._parameters:
+        del self._parameters[name]
+      if name in self._modules:
+        del self._modules[name]
+      setattr(self, name, None)
 
   def configure_input_adapter(
       self,

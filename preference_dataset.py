@@ -167,7 +167,7 @@ class FixedRefH5Dataset(Dataset):
     if elo_value is not None:
       sample_weight = max(
           self.elo_weight_min,
-          self.elo_weight_slope * (float(elo_value) - 1500.0) + self.elo_weight_intercept
+          self.elo_weight_slope * (float(elo_value) - 3000.0) + self.elo_weight_intercept
       )
     else:
       sample_weight = self.elo_weight_intercept
