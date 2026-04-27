@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import bisect
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -90,19 +91,26 @@ class FixedRefH5Dataset(Dataset):
     self.elo_weight_intercept = float(elo_weight_intercept)
     self.elo_weight_min = float(elo_weight_min)
     self._h5: h5py.File | None = None
-    self._index = self._build_index()
+    self._game_names, self._game_end_offsets = self._build_index()
+    self._length = self._game_end_offsets[-1] if self._game_end_offsets else 0
     self._player_to_id = self._build_player_vocab()
 
-  def _build_index(self) -> list[tuple[str, int]]:
-    index: list[tuple[str, int]] = []
+  def _build_index(self) -> tuple[list[str], list[int]]:
+    game_names: list[str] = []
+    game_end_offsets: list[int] = []
+    total_positions = 0
     with h5py.File(self.h5_path, "r") as h5_file:
       for game_name in sorted(h5_file.keys()):
         positions = h5_file[game_name].get("positions")
         if positions is None:
           continue
-        for pos_idx in range(len(positions)):
-          index.append((game_name, pos_idx))
-    return index
+        num_positions = len(positions)
+        if num_positions <= 0:
+          continue
+        total_positions += num_positions
+        game_names.append(game_name)
+        game_end_offsets.append(total_positions)
+    return game_names, game_end_offsets
 
   def _build_player_vocab(self) -> dict[str, int]:
     players: set[str] = set()
@@ -121,7 +129,16 @@ class FixedRefH5Dataset(Dataset):
     return self._h5
 
   def __len__(self) -> int:
-    return len(self._index)
+    return self._length
+
+  def _resolve_index(self, idx: int) -> tuple[str, int]:
+    if idx < 0:
+      idx += self._length
+    if idx < 0 or idx >= self._length:
+      raise IndexError(idx)
+    game_idx = bisect.bisect_right(self._game_end_offsets, idx)
+    game_start = 0 if game_idx == 0 else self._game_end_offsets[game_idx - 1]
+    return self._game_names[game_idx], idx - game_start
 
   def _resolve_player_context(self, attrs: h5py.AttributeManager, turn: int) -> ContextValue:
     player_key = "black_player" if turn == cshogi.BLACK else "white_player"
@@ -145,23 +162,23 @@ class FixedRefH5Dataset(Dataset):
         context_label=bucket_label,
     )
 
-  def _resolve_context(self, attrs: h5py.AttributeManager, sfen: str) -> ContextValue:
-    board = cshogi.Board(sfen)
+  def _resolve_context(self, attrs: h5py.AttributeManager, board: cshogi.Board) -> ContextValue:
     if self.context_type == "player":
       return self._resolve_player_context(attrs, board.turn)
     return self._resolve_elo_context(attrs, board.turn)
 
   def __getitem__(self, idx: int) -> FixedRefSample:
     h5_file = self._ensure_open()
-    game_name, pos_idx = self._index[idx]
+    game_name, pos_idx = self._resolve_index(idx)
     group = h5_file[game_name]
     position = group["positions"][pos_idx]
-    sfen = _decode_position_sfen(position)
-    context = self._resolve_context(group.attrs, sfen)
+    board = cshogi.Board()
+    board.set_psfen(packed_sfen_field_view(position))
+    sfen = board.sfen()
+    context = self._resolve_context(group.attrs, board)
     game_result = int(group.attrs.get("game_result", 0))
 
     # Calculate weight based on Elo.
-    board = cshogi.Board(sfen)
     elo_key = "rating_b" if board.turn == cshogi.BLACK else "rating_w"
     elo_value = group.attrs.get(elo_key)
     if elo_value is not None:
@@ -219,4 +236,14 @@ def collate_fixed_ref_samples(samples: list[FixedRefSample]) -> dict[str, Any]:
       "context_type": [sample.context.context_type for sample in samples],
       "context_label": [sample.context.context_label for sample in samples],
       "metadata": [sample.metadata for sample in samples],
+  }
+
+
+def collate_fixed_ref_samples_for_training(samples: list[FixedRefSample]) -> dict[str, Any]:
+  return {
+      "sfen": [sample.sfen for sample in samples],
+      "actual_move": torch.tensor([sample.actual_move for sample in samples], dtype=torch.int64),
+      "ply": torch.tensor([sample.ply for sample in samples], dtype=torch.float32).unsqueeze(1),
+      "context_id": torch.tensor([sample.context.context_id for sample in samples], dtype=torch.int64),
+      "weight": torch.tensor([sample.sample_weight for sample in samples], dtype=torch.float32),
   }

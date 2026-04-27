@@ -296,7 +296,7 @@ void Position::set(std::string sfen , StateInfo* si , Thread* th)
 
 	// --- effect
 
-#if defined (LONG_EFFECT_LIBRARY)
+#if defined (LONG_EFFECT_LIBRARY) && !defined(EVAL_LEARN)
   // 利きの全計算による更新
 	LongEffect::calc_effect(*this);
 #endif
@@ -307,7 +307,9 @@ void Position::set(std::string sfen , StateInfo* si , Thread* th)
 	st->materialValue = Eval::material(*this);
 #endif
 
+#if !defined(EVAL_LEARN)
 	Eval::compute_eval(*this);
+#endif
 
 	// --- 入玉の駒点の設定
 

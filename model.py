@@ -470,6 +470,12 @@ class NNUE(pl.LightningModule):
         if torch.is_floating_point(value)
     }
 
+  def _zero_loss_with_grad(self) -> Tensor:
+    for param in self.parameters():
+      if param.requires_grad and torch.is_floating_point(param):
+        return param.sum() * 0.0
+    raise RuntimeError("No trainable floating-point parameters are available to anchor the loss.")
+
   def _make_sparse_tensors_from_fens(
       self,
       fens: list[str],
@@ -595,7 +601,7 @@ class NNUE(pl.LightningModule):
     device = param.device
     actual_fens, ref_fens, pair_plies, pair_context_ids, weights = self._build_fixed_ref_pairs(batch, device)
     if not actual_fens:
-      loss = param.sum() * 0.0
+      loss = self._zero_loss_with_grad()
       self.log(loss_type, loss)
       self.log(f"{loss_type}_fixed_ref_pairs", 0.0)
       return loss

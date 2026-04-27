@@ -120,12 +120,14 @@ class NNUEDataModule(pl.LightningDataModule):
 
     def train_dataloader(self) -> DataLoader:
         if self.hparams.preference_data:
+            train_workers = self.hparams.py_data_train_num_workers
             return DataLoader(
                 self.train_ds,
                 batch_size=self.hparams.batch_size,
                 shuffle=True,
-                num_workers=self.hparams.py_data_train_num_workers,
-                collate_fn=preference_dataset.collate_fixed_ref_samples,
+                num_workers=train_workers,
+                persistent_workers=(train_workers > 0),
+                collate_fn=preference_dataset.collate_fixed_ref_samples_for_training,
             )
         if self.hparams.py_data:
             sampler = nnue_bin_dataset.create_sampling_strategy(
@@ -156,7 +158,7 @@ class NNUEDataModule(pl.LightningDataModule):
                 self.val_ds,
                 batch_size=self.hparams.py_data_val_batch_size,
                 num_workers=0,
-                collate_fn=preference_dataset.collate_fixed_ref_samples,
+                collate_fn=preference_dataset.collate_fixed_ref_samples_for_training,
             )
         if self.hparams.py_data:
             return DataLoader(self.val_ds, batch_size=self.hparams.py_data_val_batch_size)

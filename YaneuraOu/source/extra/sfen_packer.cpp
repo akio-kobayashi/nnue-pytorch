@@ -468,7 +468,7 @@ Tools::Result Position::set_from_packed_sfen(const PackedSfen& sfen , StateInfo 
 
 	// --- effect
 
-#if defined (LONG_EFFECT_LIBRARY)
+#if defined (LONG_EFFECT_LIBRARY) && !defined(EVAL_LEARN)
 	// 利きの全計算による更新
 	LongEffect::calc_effect(*this);
 #endif
