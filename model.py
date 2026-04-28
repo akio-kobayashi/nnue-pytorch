@@ -193,9 +193,9 @@ class NNUE(pl.LightningModule):
     if adapter == "halfkp_lora":
       in_features = self.input.in_features
       out_features = self.input.out_features
-      # Single shared low-rank adapter across all contexts.
-      self.input_lora_a = nn.Embedding(1, self.input_adapter_rank * in_features)
-      self.input_lora_b = nn.Embedding(1, out_features * self.input_adapter_rank)
+      # Sparse embedding-based LoRA: each feature gets a rank-dim update vector
+      self.input_lora_a = nn.Embedding(in_features, self.input_adapter_rank)
+      self.input_lora_b = nn.Embedding(out_features, self.input_adapter_rank)
       
       if self.input_adapter_init_std > 0.0:
         nn.init.normal_(self.input_lora_a.weight, mean=0.0, std=self.input_adapter_init_std)
@@ -209,10 +209,10 @@ class NNUE(pl.LightningModule):
   def get_effective_input_weight(self) -> Tensor:
     weight = self.input.weight
     if self.input_adapter == "halfkp_lora" and self.input_lora_a is not None:
-      a = self.input_lora_a.weight.reshape(self.input_adapter_rank, -1)       # [rank, in_features]
-      b = self.input_lora_b.weight.reshape(-1, self.input_adapter_rank)        # [out_features, rank]
+      a = self.input_lora_a.weight                                    # [in_features, rank]
+      b = self.input_lora_b.weight                                    # [out_features, rank]
       scale = self.input_adapter_alpha / float(self.input_adapter_rank)
-      return weight + scale * (b @ a)
+      return weight + scale * (b @ a.T)
 
     return weight
 
@@ -286,15 +286,24 @@ class NNUE(pl.LightningModule):
     if self.input_adapter == "none" or self.input_lora_a is None or self.input_lora_b is None:
       return x.new_zeros((x.shape[0], self.input.out_features))
     
-    # x: [batch, in_features]
-    # Shared LoRA weights: A is [rank, in_features], B is [out_features, rank]
-    # Result = scale * ((x @ A^T) @ B^T)
-    a = self.input_lora_a.weight.reshape(self.input_adapter_rank, -1)       # [rank, in_features]
-    b = self.input_lora_b.weight.reshape(-1, self.input_adapter_rank)        # [out_features, rank]
-    res = (x @ a.T) @ b.T                                                      # [batch, out_features]
+    # x: sparse [batch, in_features]
+    # Look up LoRA vectors for active features and aggregate per sample
+    a_vecs = self.input_lora_a(x.indices()[1])                          # [nnz, rank]
+    b_vecs = self.input_lora_b.weight.unsqueeze(1)                       # [out_features, 1, rank]
     
     scale = self.input_adapter_alpha / float(self.input_adapter_rank)
-    return res * scale
+    
+    # For each feature j at index (i, j) with value v:
+    #   output[i] += v * (a_vecs[k] @ b_vecs[out_feature])
+    # Use scatter_add to aggregate contributions per sample and output dim
+    b_weights = self.input_lora_b.weight                              # [out_features, rank]
+    a_contrib = a_vecs @ b_weights.T                                   # [nnz, out_features]
+    
+    batch_idx = x.indices()[0].unsqueeze(1).expand_as(a_contrib)       # [nnz, out_features]
+    output = torch.zeros(x.shape[0], self.input.out_features, device=x.device, dtype=x.dtype)
+    output.scatter_add_(0, batch_idx, a_contrib * scale)
+    
+    return output
 
   def _forward_hidden(
       self,
