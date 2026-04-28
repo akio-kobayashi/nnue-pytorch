@@ -129,36 +129,29 @@ class NNUE(pl.LightningModule):
       return checkpoint.state_dict(), {}
     raise TypeError(f"Unsupported checkpoint format for {base_ckpt}")
 
-  def _load_base_checkpoint(self, base_ckpt: str, use_ema_weights: bool = False) -> None:
-    state_dict, checkpoint = self._load_checkpoint_state(base_ckpt)
-    state_dict = {
-        key: value
-        for key, value in state_dict.items()
-        if not key.startswith("context_embedding.")
-    }
-    incompatible = self.load_state_dict(state_dict, strict=False)
-    allowed_missing = set()
-    if self.context_embedding is not None:
-      allowed_missing.add("context_embedding.weight")
-    if self.input_adapter == "halfkp_lora":
-      allowed_missing.update({"input_lora_a.weight", "input_lora_b.weight"})
-    unexpected = set(incompatible.unexpected_keys)
-    missing = set(incompatible.missing_keys) - allowed_missing
-    if unexpected or missing:
-      raise RuntimeError(
-          "base_ckpt is incompatible with the current NNUE model: "
-          f"missing={sorted(missing)}, unexpected={sorted(unexpected)}"
-      )
-
-    if checkpoint:
-      self.on_load_checkpoint(checkpoint)
-
-    if use_ema_weights:
-      if not self.apply_ema_weights():
-        raise RuntimeError("Requested use_ema_weights=True but no EMA weights were found in base_ckpt.")
-      # Training should start from the EMA parameters themselves.
-      self._ema_backup = None
-
+    state_dict = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+    model_state = state_dict.get('state_dict', state_dict)
+    
+    # Map old key names to new key names
+    remapped = {}
+    for k, v in model_state.items():
+        if k == 'input.weight':
+            remapped['input_w.weight'] = v
+            remapped['input_b.weight'] = v.clone()
+        elif k.startswith('input.'):
+            remapped[k.replace('input.', 'input_w.')] = v
+        else:
+            remapped[k] = v
+    model_state = remapped
+    
+    self.load_state_dict(model_state, strict=False, assign=True)
+    
+    if use_ema_weights and 'ema_state' in state_dict:
+        self._ema_state = {
+            name: tensor.clone()
+            for name, tensor in state_dict['ema_state'].items()
+            if isinstance(tensor, torch.Tensor)
+        }
   def _set_base_input_trainable(self, trainable: bool) -> None:
     def _set_base_input_trainable(self, trainable: bool) -> None:
       self.input_w.weight.requires_grad = trainable
