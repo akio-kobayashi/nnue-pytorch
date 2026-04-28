@@ -482,18 +482,6 @@ class NNUE(pl.LightningModule):
     }
     return functional_call(self, state, (us, them, white, black))
 
-  def _score_fens_with_fixed_ref(
-      self,
-      fens: list[str],
-      plies: list[int],
-      device: torch.device,
-  ) -> Tensor:
-    if not fens:
-      return torch.empty(0, device=device)
-    us, them, white, black = self._make_sparse_tensors_from_fens(fens, plies, device)
-    with torch.no_grad():
-      q = self._fixed_ref_forward(us, them, white, black).reshape(-1)
-    return q
 
   def _iter_candidate_after_fens(self, sfen: str, actual_move: int) -> list[tuple[int, str]]:
     board = cshogi.Board(sfen)
@@ -541,7 +529,15 @@ class NNUE(pl.LightningModule):
 
       candidate_fens = [candidate_sfen for _move, candidate_sfen in candidates]
       candidate_plies = [int(ply) + 1 for _ in candidate_fens]
-      ref_scores = self._score_fens_with_fixed_ref(candidate_fens, candidate_plies, device)
+      
+      # Batch evaluate all candidates at once using C++ sparse batch generation
+      all_fens = candidate_fens
+      all_plies = candidate_plies
+      us, them, white, black = self._make_sparse_tensors_from_fens(all_fens, all_plies, device)
+      with torch.no_grad():
+        q = self._fixed_ref_forward(us, them, white, black).reshape(-1)
+      ref_scores = q
+      
       # The network output is side-to-move oriented. After one move, the side to
       # move is the opponent, so the original mover's utility is the negative score.
       ref_utilities = -ref_scores
