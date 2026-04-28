@@ -148,7 +148,7 @@ class NNUEDataModule(pl.LightningDataModule):
                 sampler=sampler,
                 num_workers=self.hparams.py_data_train_num_workers,
             )
-        return DataLoader(self.train_ds, batch_size=None, batch_sampler=None)
+        return DataLoader(self.train_ds, batch_size=None, batch_sampler=None, num_workers=self.hparams.num_workers, persistent_workers=True)
 
     def val_dataloader(self) -> DataLoader:
         if self.hparams.preference_data:
@@ -160,7 +160,7 @@ class NNUEDataModule(pl.LightningDataModule):
             )
         if self.hparams.py_data:
             return DataLoader(self.val_ds, batch_size=self.hparams.py_data_val_batch_size)
-        return DataLoader(self.val_ds, batch_size=None, batch_sampler=None)
+        return DataLoader(self.val_ds, batch_size=None, batch_sampler=None, num_workers=self.hparams.num_workers, persistent_workers=True)
 
 class MyCLI(LightningCLI):
     def add_arguments_to_parser(self, parser) -> None:
