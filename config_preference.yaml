@@ -31,6 +31,7 @@ data:
   # Preference Dataset settings
   preference_data: true
   preference_context_type: "elo"
+  py_data_train_num_workers: 16
   
   # Elo Bucket definition: boundaries for context_id assignment
   # Buckets: <1200, 1200-1600, 1600-2000, 2000-2400, >2400
@@ -48,6 +49,7 @@ trainer:
   accelerator: "auto"
   devices: 1
   precision: 32
+  threads: 16
   callbacks:
     - class_path: pytorch_lightning.callbacks.ModelCheckpoint
       init_args:
