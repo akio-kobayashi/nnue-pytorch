@@ -52,8 +52,8 @@ class NNUE(pl.LightningModule):
     self.FV_SCALE = 16.0
 
     feature_set = features_module.get_feature_set_from_name(features)
-    self.input_w = nn.Embedding(feature_set.num_features, l1_size)
-    self.input_b = nn.Embedding(feature_set.num_features, l1_size)
+    self.input = nn.Linear(feature_set.num_features, l1_size)
+    self.input = nn.Embedding(feature_set.num_features, l1_size)
     self.feature_set = feature_set
     self.l1 = nn.Linear(2 * l1_size, l2_size)
     self.l2 = nn.Linear(l2_size, l3_size)
@@ -154,8 +154,8 @@ class NNUE(pl.LightningModule):
         }
   def _set_base_input_trainable(self, trainable: bool) -> None:
     def _set_base_input_trainable(self, trainable: bool) -> None:
-      self.input_w.weight.requires_grad = trainable
-      self.input_b.weight.requires_grad = trainable
+      self.input.weight.requires_grad = trainable
+      self.input.weight.requires_grad = trainable
 
   def _clear_input_adapter_parameters(self) -> None:
     for name in ["input_lora_a", "input_lora_b"]:
@@ -185,8 +185,8 @@ class NNUE(pl.LightningModule):
     self._clear_input_adapter_parameters()
 
     if adapter == "halfkp_lora":
-      in_features = self.input_w.num_embeddings
-      out_features = self.input_w.embedding_dim
+      in_features = self.input.num_embeddings
+      out_features = self.input.embedding_dim
       # Sparse embedding-based LoRA: each feature gets a rank-dim update vector
       self.input_lora_a = nn.Embedding(in_features, self.input_adapter_rank)
       self.input_lora_b = nn.Embedding(out_features, self.input_adapter_rank)
@@ -201,7 +201,7 @@ class NNUE(pl.LightningModule):
     self._set_base_input_trainable(not self.freeze_base_input)
 
   def get_effective_input_weight(self) -> Tensor:
-    return None
+    return self.input.weight
     if self.input_adapter == "halfkp_lora" and self.input_lora_a is not None:
       a = self.input_lora_a.weight                                    # [in_features, rank]
       b = self.input_lora_b.weight                                    # [out_features, rank]
@@ -211,7 +211,7 @@ class NNUE(pl.LightningModule):
     return weight
 
   def get_effective_input_bias(self) -> Tensor:
-    return self.input_b.bias
+    return self.input.bias
 
   '''
   We zero all virtual feature weights because during serialization to .nnue
@@ -224,8 +224,8 @@ class NNUE(pl.LightningModule):
   def _zero_virtual_feature_weights(self) -> None:
     with torch.no_grad():
       for a, b in self.feature_set.get_virtual_feature_ranges():
-        self.input_w.weight.data[:, a:b] = 0.0
-        self.input_b.weight.data[:, a:b] = 0.0
+        self.input.weight.data[:, a:b] = 0.0
+        self.input.weight.data[:, a:b] = 0.0
 
   '''
   This method attempts to convert the model from using the self.feature_set
@@ -258,12 +258,12 @@ class NNUE(pl.LightningModule):
     # we only have to add the virtual feature on top of the already existing real ones.
     if old_feature_block.name == next(iter(new_feature_block.factors)):
       # We can just extend with zeros since it's unfactorized -> factorized
-      weights_w = self.input_w.weight.data
-      weights_b = self.input_b.weight.data
-      self.input_w = nn.Embedding(new_feature_set.num_features, self.input_w.embedding_dim)
-      self.input_b = nn.Embedding(new_feature_set.num_features, self.input_b.embedding_dim)
-      self.input_w.weight.requires_grad = False
-      self.input_b.weight.requires_grad = False
+      weights_w = self.input.weight.data
+      weights_b = self.input.weight.data
+      self.input = nn.Embedding(new_feature_set.num_features, self.input.embedding_dim)
+      self.input = nn.Embedding(new_feature_set.num_features, self.input.embedding_dim)
+      self.input.weight.requires_grad = False
+      self.input.weight.requires_grad = False
       if self.input_adapter != "none":
         self.configure_input_adapter(
             input_adapter=self.input_adapter,
@@ -277,7 +277,7 @@ class NNUE(pl.LightningModule):
 
   def _apply_input_adapter(self, x: Tensor) -> Tensor:
     if self.input_adapter == "none" or self.input_lora_a is None or self.input_lora_b is None:
-      return x.new_zeros((x.shape[0], self.input_w.embedding_dim))
+      return x.new_zeros((x.shape[0], self.input.embedding_dim))
     
     # x: sparse [batch, in_features]
     # Look up LoRA vectors for active features and aggregate per sample
@@ -293,7 +293,7 @@ class NNUE(pl.LightningModule):
     a_contrib = a_vecs @ b_weights.T                                   # [nnz, out_features]
     
     batch_idx = x.indices()[0].unsqueeze(1).expand_as(a_contrib)       # [nnz, out_features]
-    output = torch.zeros(x.shape[0], self.input_w.embedding_dim, device=x.device, dtype=x.dtype)
+    output = torch.zeros(x.shape[0], self.input.embedding_dim, device=x.device, dtype=x.dtype)
     output.scatter_add_(0, batch_idx, a_contrib * scale)
     
     return output
@@ -305,19 +305,23 @@ class NNUE(pl.LightningModule):
       w_in: Tensor,
       b_in: Tensor,
   ) -> Tensor:
-    w_idx = w_in.indices()[0]
-    b_idx = b_in.indices()[0]
     w_feat = w_in.indices()[1]
     b_feat = b_in.indices()[1]
     w_val = w_in.values()
     b_val = b_in.values()
     batch_size = w_in.shape[0]
-    w_vecs = self.input_w(w_feat)
-    b_vecs = self.input_b(b_feat)
-    w_out = torch.zeros(batch_size, self.l1.in_features, device=w_in.device, dtype=w_in.dtype)
-    b_out = torch.zeros(batch_size, self.l1.in_features, device=b_in.device, dtype=b_in.dtype)
-    w_out.scatter_add_(0, w_idx.unsqueeze(1), w_vecs * w_val.unsqueeze(1))
-    b_out.scatter_add_(0, b_idx.unsqueeze(1), b_vecs * b_val.unsqueeze(1))
+    l1_size = self.l1.in_features
+    w_vecs = F.embedding(w_feat, self.input.weight)
+    b_vecs = F.embedding(b_feat, self.input.weight)
+    if self.input.bias is not None:
+      w_vecs = w_vecs + self.input.bias
+      b_vecs = b_vecs + self.input.bias
+    w_out = torch.zeros(batch_size, l1_size, device=w_in.device, dtype=w_in.dtype)
+    b_out = torch.zeros(batch_size, l1_size, device=b_in.device, dtype=b_in.dtype)
+    w_idx = w_in.indices()[0].unsqueeze(1)
+    b_idx = b_in.indices()[0].unsqueeze(1)
+    w_out.scatter_add_(0, w_idx, w_vecs * w_val.unsqueeze(1))
+    b_out.scatter_add_(0, b_idx, b_vecs * b_val.unsqueeze(1))
     w_adapter = self._apply_input_adapter(w_in)
     b_adapter = self._apply_input_adapter(b_in)
     w = w_out + w_adapter
@@ -768,7 +772,7 @@ class NNUE(pl.LightningModule):
       if not isinstance(child, nn.Linear):
         continue
 
-      if child in (self.input_w, self.input_b):
+      if child in (self.input, self.input):
         continue
 
       # FC layers are stored as int8 weights, and int32 biases
