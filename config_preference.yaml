@@ -43,6 +43,7 @@ data:
   elo_weight_min: 0.1            # Minimum weight floor
 
 trainer:
+  num_sanity_val_steps: 0
   max_epochs: 10
   accelerator: "auto"
   devices: 1
