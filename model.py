@@ -209,8 +209,8 @@ class NNUE(pl.LightningModule):
   def get_effective_input_weight(self) -> Tensor:
     weight = self.input.weight
     if self.input_adapter == "halfkp_lora" and self.input_lora_a is not None:
-      a = self.input_lora_a.weight.reshape(self.input_adapter_rank, -1)
-      b = self.input_lora_b.weight.reshape(self.input_adapter_rank, -1).T
+      a = self.input_lora_a.weight.reshape(self.input_adapter_rank, -1)       # [rank, in_features]
+      b = self.input_lora_b.weight.reshape(-1, self.input_adapter_rank)        # [out_features, rank]
       scale = self.input_adapter_alpha / float(self.input_adapter_rank)
       return weight + scale * (b @ a)
 
@@ -290,8 +290,8 @@ class NNUE(pl.LightningModule):
     # Shared LoRA weights: A is [rank, in_features], B is [out_features, rank]
     # Result = scale * ((x @ A^T) @ B^T)
     a = self.input_lora_a.weight.reshape(self.input_adapter_rank, -1)       # [rank, in_features]
-    b = self.input_lora_b.weight.reshape(self.input_adapter_rank, -1).T      # [rank, out_features]
-    res = (x @ a.T) @ b                                                      # [batch, out_features]
+    b = self.input_lora_b.weight.reshape(-1, self.input_adapter_rank)        # [out_features, rank]
+    res = (x @ a.T) @ b.T                                                      # [batch, out_features]
     
     scale = self.input_adapter_alpha / float(self.input_adapter_rank)
     return res * scale
