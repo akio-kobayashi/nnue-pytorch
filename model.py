@@ -327,8 +327,8 @@ class NNUE(pl.LightningModule):
     b_vecs = iw[b_feat]  # [nnz, l1_size]
     w_out = torch.zeros(batch_size, l1_size, device=w_in.device, dtype=w_in.dtype)
     b_out = torch.zeros(batch_size, l1_size, device=b_in.device, dtype=b_in.dtype)
-    w_out.scatter_add_(0, w_idx.unsqueeze(1).expand_as(w_vecs), w_vecs * w_val.unsqueeze(1))
-    b_out.scatter_add_(0, b_idx.unsqueeze(1).expand_as(b_vecs), b_vecs * b_val.unsqueeze(1))
+    w_out.scatter_reduce_(0, w_idx.unsqueeze(1).expand_as(w_vecs), w_vecs * w_val.unsqueeze(1), reduce='sum', include_self=False)
+    b_out.scatter_reduce_(0, b_idx.unsqueeze(1).expand_as(b_vecs), b_vecs * b_val.unsqueeze(1), reduce='sum', include_self=False)
     if ib is not None:
       w_out = w_out + ib
       b_out = b_out + ib
