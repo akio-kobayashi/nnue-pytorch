@@ -476,11 +476,25 @@ class NNUE(pl.LightningModule):
 
   def _fixed_ref_forward(self, us: Tensor, them: Tensor, white: Tensor, black: Tensor) -> Tensor:
     self._ensure_fixed_ref_state()
-    state = {
-        key: value.to(device=us.device, dtype=value.dtype)
-        for key, value in self._fixed_ref_state.items()
-    }
-    return functional_call(self, state, (us, them, white, black))
+    s = self._fixed_ref_state
+    input_weight = s["input.weight"].to(device=us.device, dtype=us.dtype)
+    input_bias = s["input.bias"].to(device=us.device, dtype=us.dtype)
+    l1_weight = s["l1.weight"].to(device=us.device, dtype=us.dtype)
+    l1_bias = s["l1.bias"].to(device=us.device, dtype=us.dtype)
+    l2_weight = s["l2.weight"].to(device=us.device, dtype=us.dtype)
+    l2_bias = s["l2.bias"].to(device=us.device, dtype=us.dtype)
+    output_weight = s["output.weight"].to(device=us.device, dtype=us.dtype)
+    output_bias = s["output.bias"].to(device=us.device, dtype=us.dtype)
+    
+    w_base = F.linear(white, input_weight, input_bias)
+    b_base = F.linear(black, input_weight, input_bias)
+    w = w_base + b_base
+    b = b_base + w_base
+    l0_ = (us * torch.cat([w, b], dim=1)) + (them * torch.cat([b, w], dim=1))
+    l0_ = torch.clamp(l0_, 0.0, 1.0)
+    l1_ = torch.clamp(F.linear(l0_, l1_weight, l1_bias), 0.0, 1.0)
+    l2_ = torch.clamp(F.linear(l1_, l2_weight, l2_bias), 0.0, 1.0)
+    return F.linear(l2_, output_weight, output_bias)
 
 
   def _iter_candidate_after_fens(self, sfen: str, actual_move: int) -> list[tuple[int, str]]:
