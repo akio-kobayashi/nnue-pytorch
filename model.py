@@ -210,7 +210,7 @@ class NNUE(pl.LightningModule):
     weight = self.input.weight
     if self.input_adapter == "halfkp_lora" and self.input_lora_a is not None:
       a = self.input_lora_a.weight.reshape(self.input_adapter_rank, -1)
-      b = self.input_lora_b.weight.reshape(-1, self.input_adapter_rank)
+      b = self.input_lora_b.weight.reshape(self.input_adapter_rank, -1).T
       scale = self.input_adapter_alpha / float(self.input_adapter_rank)
       return weight + scale * (b @ a)
 
@@ -287,18 +287,14 @@ class NNUE(pl.LightningModule):
       return x.new_zeros((x.shape[0], self.input.out_features))
     
     # x: [batch, in_features]
-    batch_size = x.shape[0]
-    a = self.input_lora_a.weight.reshape(self.input_adapter_rank, -1)
-    b = self.input_lora_b.weight.reshape(-1, self.input_adapter_rank)
-    
-    # Result = scale * (x @ A.T @ B.T)
-    # x @ A.T: [batch, 1, in_features] @ [batch, in_features, rank] -> [batch, 1, rank]
-    res_a = torch.bmm(x.unsqueeze(1), a.transpose(1, 2))
-    # res_a @ B.T: [batch, 1, rank] @ [batch, rank, out_features] -> [batch, 1, out_features]
-    res_b = torch.bmm(res_a, b.transpose(1, 2))
+    # Shared LoRA weights: A is [rank, in_features], B is [out_features, rank]
+    # Result = scale * ((x @ A^T) @ B^T)
+    a = self.input_lora_a.weight.reshape(self.input_adapter_rank, -1)       # [rank, in_features]
+    b = self.input_lora_b.weight.reshape(self.input_adapter_rank, -1).T      # [rank, out_features]
+    res = (x @ a.T) @ b                                                      # [batch, out_features]
     
     scale = self.input_adapter_alpha / float(self.input_adapter_rank)
-    return res_b.squeeze(1) * scale
+    return res * scale
 
   def _forward_hidden(
       self,
