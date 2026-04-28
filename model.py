@@ -193,9 +193,9 @@ class NNUE(pl.LightningModule):
     if adapter == "halfkp_lora":
       in_features = self.input.in_features
       out_features = self.input.out_features
-      # Each context (Elo bucket) has its own low-rank adapter.
-      self.input_lora_a = nn.Embedding(self.preference_num_contexts, self.input_adapter_rank * in_features)
-      self.input_lora_b = nn.Embedding(self.preference_num_contexts, out_features * self.input_adapter_rank)
+      # Single shared low-rank adapter across all contexts.
+      self.input_lora_a = nn.Embedding(1, self.input_adapter_rank * in_features)
+      self.input_lora_b = nn.Embedding(1, out_features * self.input_adapter_rank)
       
       if self.input_adapter_init_std > 0.0:
         nn.init.normal_(self.input_lora_a.weight, mean=0.0, std=self.input_adapter_init_std)
@@ -206,23 +206,17 @@ class NNUE(pl.LightningModule):
 
     self._set_base_input_trainable(not self.freeze_base_input)
 
-  def get_effective_input_weight(self, context_id: Tensor | None = None) -> Tensor:
+  def get_effective_input_weight(self) -> Tensor:
     weight = self.input.weight
-    if self.input_adapter == "halfkp_lora":
-      if self.input_lora_a is None or self.input_lora_b is None or context_id is None:
-        return weight
-      
-      # For a single context_id (e.g. during inference or conditioned export)
-      if context_id.dim() == 0 or (context_id.dim() == 1 and context_id.shape[0] == 1):
-        cid = context_id.reshape(-1)[0]
-        a = self.input_lora_a(cid).reshape(self.input_adapter_rank, -1)
-        b = self.input_lora_b(cid).reshape(-1, self.input_adapter_rank)
-        scale = self.input_adapter_alpha / float(self.input_adapter_rank)
-        return weight + scale * (b @ a)
+    if self.input_adapter == "halfkp_lora" and self.input_lora_a is not None:
+      a = self.input_lora_a.weight.reshape(self.input_adapter_rank, -1)
+      b = self.input_lora_b.weight.reshape(-1, self.input_adapter_rank)
+      scale = self.input_adapter_alpha / float(self.input_adapter_rank)
+      return weight + scale * (b @ a)
 
     return weight
 
-  def get_effective_input_bias(self, context_id: Tensor | None = None) -> Tensor:
+  def get_effective_input_bias(self) -> Tensor:
     return self.input.bias
 
   '''
@@ -288,15 +282,14 @@ class NNUE(pl.LightningModule):
     else:
       raise Exception('Cannot change feature set from {} to {}.'.format(self.feature_set.name, new_feature_set.name))
 
-  def _apply_input_adapter(self, x: Tensor, context_id: Tensor | None) -> Tensor:
-    if self.input_adapter == "none" or self.input_lora_a is None or self.input_lora_b is None or context_id is None:
+  def _apply_input_adapter(self, x: Tensor) -> Tensor:
+    if self.input_adapter == "none" or self.input_lora_a is None or self.input_lora_b is None:
       return x.new_zeros((x.shape[0], self.input.out_features))
     
     # x: [batch, in_features]
-    # context_id: [batch]
     batch_size = x.shape[0]
-    a = self.input_lora_a(context_id).reshape(batch_size, self.input_adapter_rank, -1)
-    b = self.input_lora_b(context_id).reshape(batch_size, -1, self.input_adapter_rank)
+    a = self.input_lora_a.weight.reshape(self.input_adapter_rank, -1)
+    b = self.input_lora_b.weight.reshape(-1, self.input_adapter_rank)
     
     # Result = scale * (x @ A.T @ B.T)
     # x @ A.T: [batch, 1, in_features] @ [batch, in_features, rank] -> [batch, 1, rank]
@@ -313,15 +306,14 @@ class NNUE(pl.LightningModule):
       them: Tensor,
       w_in: Tensor,
       b_in: Tensor,
-      context_id: Tensor | None = None,
   ) -> Tensor:
     # Base linear pass
     w_base = F.linear(w_in, self.input.weight, self.input.bias)
     b_base = F.linear(b_in, self.input.weight, self.input.bias)
     
-    # Context-conditioned LoRA pass
-    w_adapter = self._apply_input_adapter(w_in, context_id)
-    b_adapter = self._apply_input_adapter(b_in, context_id)
+    # Shared LoRA pass
+    w_adapter = self._apply_input_adapter(w_in)
+    b_adapter = self._apply_input_adapter(b_in)
     
     w = w_base + w_adapter
     b = b_base + b_adapter
@@ -342,14 +334,9 @@ class NNUE(pl.LightningModule):
       them: Tensor,
       w_in: Tensor,
       b_in: Tensor,
-      context_id: Tensor,
   ) -> Tensor:
-    hidden = self._forward_hidden(us, them, w_in, b_in, context_id=context_id)
-    # Output layer context delta is now optional/auxiliary since we have FT adapter.
-    # For now, we keep it as an additive term if context_embedding exists.
+    hidden = self._forward_hidden(us, them, w_in, b_in)
     q = self.output(hidden)
-    if self.context_embedding is not None:
-      q = q + self._forward_context_delta(hidden, context_id)
     return q
 
   def _compute_lambda(self, ply: Tensor) -> Tensor | float:
@@ -580,8 +567,8 @@ class NNUE(pl.LightningModule):
       device: torch.device,
   ) -> Tensor:
     us, them, white, black = self._make_sparse_tensors_from_fens(fens, plies, device)
-    context_tensor = torch.tensor(context_ids, dtype=torch.long, device=device)
-    return self.forward_with_context(us, them, white, black, context_tensor).reshape(-1)
+    # context_ids ignored: LoRA adapter is now shared across all contexts
+    return self.forward(us, them, white, black).reshape(-1)
 
   def _forward_context_delta(self, hidden: Tensor, context_id: Tensor) -> Tensor:
     if self.context_embedding is None:

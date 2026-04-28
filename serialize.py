@@ -155,11 +155,7 @@ class NNUEWriter():
 
   def coalesce_ft_weights(self, model, layer):
     if hasattr(model, "get_effective_input_weight"):
-      ctx_tensor = None
-      if self.context_id is not None:
-        ctx_tensor = torch.tensor(self.context_id, dtype=torch.long)
-        print(f"Merging adapter for context_id: {self.context_id}")
-      weight = model.get_effective_input_weight(context_id=ctx_tensor).detach()
+      weight = model.get_effective_input_weight().detach()
     else:
       weight = layer.weight.data
     indices = model.feature_set.get_virtual_to_real_features_gather_indices()
