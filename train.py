@@ -91,30 +91,28 @@ class NNUEDataModule(pl.LightningDataModule):
             self.train_ds = nnue_bin_dataset.NNUEBinData(self.hparams.train, self.feature_set)
             self.val_ds = nnue_bin_dataset.NNUEBinData(self.hparams.val, self.feature_set)
         else:
-            train_infinite = nnue_dataset.SparseBatchDataset(
-                self.hparams.features,
-                self.hparams.train,
-                self.hparams.batch_size,
-                num_workers=self.hparams.num_workers,
-                filtered=self.hparams.smart_fen_skipping,
-                random_fen_skipping=self.hparams.random_fen_skipping,
-                device=main_device,
-            )
-            val_infinite = nnue_dataset.SparseBatchDataset(
-                self.hparams.features,
-                self.hparams.val,
-                self.hparams.batch_size,
-                filtered=self.hparams.smart_fen_skipping,
-                random_fen_skipping=self.hparams.random_fen_skipping,
-                device=main_device,
-            )
             self.train_ds = nnue_dataset.FixedNumBatchesDataset(
-                train_infinite,
+                nnue_dataset.SparseBatchDataset(
+                    self.hparams.features,
+                    self.hparams.train,
+                    self.hparams.batch_size,
+                    num_workers=self.hparams.num_workers,
+                    filtered=self.hparams.smart_fen_skipping,
+                    random_fen_skipping=self.hparams.random_fen_skipping,
+                    device=main_device,
+                ),
                 (self.hparams.epoch_size + self.hparams.batch_size - 1) // self.hparams.batch_size,
             )
             val_size = self.hparams.validation_size
             self.val_ds = nnue_dataset.FixedNumBatchesDataset(
-                val_infinite,
+                nnue_dataset.SparseBatchDataset(
+                    self.hparams.features,
+                    self.hparams.val,
+                    self.hparams.batch_size,
+                    filtered=self.hparams.smart_fen_skipping,
+                    random_fen_skipping=self.hparams.random_fen_skipping,
+                    device=main_device,
+                ),
                 (val_size + self.hparams.batch_size - 1) // self.hparams.batch_size,
             )
 

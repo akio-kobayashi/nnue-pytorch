@@ -60,19 +60,19 @@ class SparseBatch(ctypes.Structure):
     ]
 
     def get_tensors(self, device):
-        white_values = torch.from_numpy(np.ctypeslib.as_array(self.white_values, shape=(self.num_active_white_features,))).pin_memory().to(device=device, non_blocking=True)
-        black_values = torch.from_numpy(np.ctypeslib.as_array(self.black_values, shape=(self.num_active_black_features,))).pin_memory().to(device=device, non_blocking=True)
-        iw = torch.transpose(torch.from_numpy(np.ctypeslib.as_array(self.white, shape=(self.num_active_white_features, 2))).pin_memory().to(device=device, non_blocking=True), 0, 1).long()
-        ib = torch.transpose(torch.from_numpy(np.ctypeslib.as_array(self.black, shape=(self.num_active_white_features, 2))).pin_memory().to(device=device, non_blocking=True), 0, 1).long()
-        us = torch.from_numpy(np.ctypeslib.as_array(self.is_white, shape=(self.size, 1))).pin_memory().to(device=device, non_blocking=True)
+        white_values = torch.from_numpy(np.ctypeslib.as_array(self.white_values, shape=(self.num_active_white_features,))).to(device=device, non_blocking=True)
+        black_values = torch.from_numpy(np.ctypeslib.as_array(self.black_values, shape=(self.num_active_black_features,))).to(device=device, non_blocking=True)
+        iw = torch.transpose(torch.from_numpy(np.ctypeslib.as_array(self.white, shape=(self.num_active_white_features, 2))).to(device=device, non_blocking=True), 0, 1).long()
+        ib = torch.transpose(torch.from_numpy(np.ctypeslib.as_array(self.black, shape=(self.num_active_white_features, 2))).to(device=device, non_blocking=True), 0, 1).long()
+        us = torch.from_numpy(np.ctypeslib.as_array(self.is_white, shape=(self.size, 1))).to(device=device, non_blocking=True)
         them = 1.0 - us
-        outcome = torch.from_numpy(np.ctypeslib.as_array(self.outcome, shape=(self.size, 1))).pin_memory().to(device=device, non_blocking=True)
-        score = torch.from_numpy(np.ctypeslib.as_array(self.score, shape=(self.size, 1))).pin_memory().to(device=device, non_blocking=True)
+        outcome = torch.from_numpy(np.ctypeslib.as_array(self.outcome, shape=(self.size, 1))).to(device=device, non_blocking=True)
+        score = torch.from_numpy(np.ctypeslib.as_array(self.score, shape=(self.size, 1))).to(device=device, non_blocking=True)
         white = torch.sparse_coo_tensor(iw, white_values, (self.size, self.num_inputs))
         black = torch.sparse_coo_tensor(ib, black_values, (self.size, self.num_inputs))
         white._coalesced_(True)
         black._coalesced_(True)
-        ply = torch.from_numpy(np.ctypeslib.as_array(self.ply, shape=(self.size, 1))).pin_memory().to(device=device, non_blocking=True)
+        ply = torch.from_numpy(np.ctypeslib.as_array(self.ply, shape=(self.size, 1))).to(device=device, non_blocking=True)
         return us, them, white, black, outcome, score, ply
 
 class PythonSparseBatch:
@@ -296,15 +296,20 @@ class SparseBatchDataset(torch.utils.data.IterableDataset):
   def __iter__(self):
     return SparseBatchProvider(self.feature_set, self.filename, self.batch_size, cyclic=self.cyclic, num_workers=self.num_workers, filtered=self.filtered, random_fen_skipping=self.random_fen_skipping, device=self.device)
 
-class FixedNumBatchesDataset(Dataset):
+class FixedNumBatchesDataset(torch.utils.data.IterableDataset):
   def __init__(self, dataset, num_batches):
     super(FixedNumBatchesDataset, self).__init__()
-    self.dataset = dataset;
-    self.iter = iter(self.dataset)
+    self.dataset = dataset
     self.num_batches = num_batches
 
-  def __len__(self):
-    return self.num_batches
-
-  def __getitem__(self, idx):
-    return next(self.iter)
+  def __iter__(self):
+    worker_info = torch.utils.data.get_worker_info()
+    iterator = iter(self.dataset)
+    if worker_info is not None:
+        iter_start = worker_info.id
+        iter_end = worker_info.num_workers
+        for i in range(iter_start, self.num_batches, iter_end):
+            yield next(iterator)
+    else:
+        for i in range(self.num_batches):
+            yield next(iterator)

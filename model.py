@@ -653,7 +653,7 @@ class NNUE(pl.LightningModule):
 
   def validation_step(self, batch: Batch, batch_idx: int) -> Tensor:
     loss = self.step_(batch, batch_idx, 'val_loss')
-    self.validation_step_outputs.append(loss)
+    self.validation_step_outputs.append(loss.detach())
     return loss
 
   def on_fit_start(self) -> None:
@@ -676,9 +676,8 @@ class NNUE(pl.LightningModule):
   
   def on_validation_epoch_end(self) -> None:
     try:
-      if not self.validation_step_outputs:
-        return
-      self.validation_step_outputs.clear()
+      if self.validation_step_outputs:
+        del self.validation_step_outputs[:]
     finally:
       self.restore_original_weights()
 
