@@ -190,29 +190,35 @@ class PreferenceDataModule(pl.LightningDataModule):
         self.feature_set = features_module.get_feature_set_from_name(self.hparams.features)
 
     def setup(self, stage: Optional[str] = None) -> None:
-        # The DLL reads .bin files directly; metadata is in the meta section.
-        # Create datasets that use FixedNumBatchesDataset + SparseBatchDataset
-        # with the preference binary file paths.
         main_device = "cpu"
         if self.trainer:
             if self.trainer.strategy.root_device.type == "cuda":
                 main_device = f"cuda:{self.trainer.strategy.root_device.index}"
 
-        # Build preference index from H5 if .idx doesn't exist yet
-        self._build_or_verify_index(self.hparams.train, "train")
-        self._build_or_verify_index(self.hparams.val, "val")
+        h5_train = self.hparams.train
+        h5_val = self.hparams.val
 
-        train_bin = str(Path(self.hparams.train).with_suffix(".bin"))
-        val_bin = str(Path(self.hparams.val).with_suffix(".bin"))
+        # Convert H5 paths to .bin paths
+        train_bin = str(Path(h5_train).with_suffix(".bin"))
+        train_meta = train_bin.replace(".bin", "_meta.bin")
+        val_bin = str(Path(h5_val).with_suffix(".bin"))
+        val_meta = val_bin.replace(".bin", "_meta.bin")
 
         epoch_size = getattr(self.hparams, "epoch_size", 10_000_000)
         validation_size = getattr(self.hparams, "validation_size", 1_000_000)
 
+        # Verify binary files exist; warn if missing
         if not Path(train_bin).exists():
-            print(f"Warning: {train_bin} not found. Using Python fallback.")
+            print(f"Warning: {train_bin} not found. Run: python export_preference_data.py {h5_train}")
+            return
+        if not Path(train_meta).exists():
+            print(f"Warning: {train_meta} not found. Run: python export_preference_data.py {h5_train}")
             return
         if not Path(val_bin).exists():
-            print(f"Warning: {val_bin} not found. Using Python fallback.")
+            print(f"Warning: {val_bin} not found. Run: python export_preference_data.py {h5_val}")
+            return
+        if not Path(val_meta).exists():
+            print(f"Warning: {val_meta} not found. Run: python export_preference_data.py {h5_val}")
             return
 
         self.train_ds = nnue_dataset.FixedNumBatchesDataset(
@@ -238,21 +244,6 @@ class PreferenceDataModule(pl.LightningDataModule):
             ),
             (validation_size + self.hparams.batch_size - 1) // self.hparams.batch_size,
         )
-
-    def _build_or_verify_index(self, h5_path: str, label: str) -> None:
-        """Check that .idx file exists alongside H5; if not, warn user."""
-        idx_path = str(Path(h5_path).with_suffix(".idx"))
-        bin_path = str(Path(h5_path).with_suffix(".bin"))
-        meta_path = bin_path.replace(".bin", "_meta.bin")
-        if not Path(idx_path).exists():
-            print(f"[{label}] Index file {idx_path} not found.")
-            print(f"  Run: python /tmp/export.py {h5_path}")
-        if not Path(bin_path).exists():
-            print(f"[{label}] Binary file {bin_path} not found.")
-            print(f"  Run: python /tmp/export.py {h5_path}")
-        if not Path(meta_path).exists():
-            print(f"[{label}] Meta file {meta_path} not found.")
-            print(f"  Run: python /tmp/export.py {h5_path}")
 
     def train_dataloader(self) -> DataLoader:
         if not hasattr(self, "train_ds"):
