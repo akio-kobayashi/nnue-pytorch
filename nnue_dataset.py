@@ -184,6 +184,14 @@ class TrainingDataProvider:
     def __iter__(self):
         return self
 
+    def _cleanup_stream(self):
+        if hasattr(self, 'stream') and self.stream is not None:
+            try:
+                self.destroy_stream(self.stream)
+            except Exception:
+                pass
+            self.stream = None
+
     def __next__(self):
         v = self.fetch_next(self.stream)
 
@@ -192,10 +200,13 @@ class TrainingDataProvider:
             self.destroy_part(v)
             return tensors
         else:
+            # cyclic=False or end of data: explicitly close the stream to
+            # prevent leaking the C++-side file handles and buffers.
+            self._cleanup_stream()
             raise StopIteration
 
     def __del__(self):
-        self.destroy_stream(self.stream)
+        self._cleanup_stream()
 
 
 def make_sparse_batch_from_fens(feature_set, fens, scores, plies, results):
@@ -292,9 +303,20 @@ class SparseBatchDataset(torch.utils.data.IterableDataset):
     self.filtered = filtered
     self.random_fen_skipping = random_fen_skipping
     self.device = device
+    self._provider = None
+    self._created = False
 
   def __iter__(self):
-    return SparseBatchProvider(self.feature_set, self.filename, self.batch_size, cyclic=self.cyclic, num_workers=self.num_workers, filtered=self.filtered, random_fen_skipping=self.random_fen_skipping, device=self.device)
+    if not self._created:
+      self._provider = SparseBatchProvider(
+          self.feature_set, self.filename, self.batch_size,
+          cyclic=self.cyclic, num_workers=self.num_workers,
+          filtered=self.filtered,
+          random_fen_skipping=self.random_fen_skipping,
+          device=self.device,
+      )
+      self._created = True
+    return self._provider
 
 class FixedNumBatchesDataset(torch.utils.data.IterableDataset):
   def __init__(self, dataset, num_batches):
@@ -309,7 +331,20 @@ class FixedNumBatchesDataset(torch.utils.data.IterableDataset):
         iter_start = worker_info.id
         iter_end = worker_info.num_workers
         for i in range(iter_start, self.num_batches, iter_end):
-            yield next(iterator)
+            try:
+                yield next(iterator)
+            except StopIteration:
+                # underlying provider exhausted; cleanup its stream
+                provider = getattr(iterator, '_provider', None)
+                if provider is not None:
+                    provider._cleanup_stream()
+                break
     else:
         for i in range(self.num_batches):
-            yield next(iterator)
+            try:
+                yield next(iterator)
+            except StopIteration:
+                provider = getattr(iterator, '_provider', None)
+                if provider is not None:
+                    provider._cleanup_stream()
+                break
