@@ -2,6 +2,8 @@ import model as M
 import nnue_dataset
 import nnue_bin_dataset
 import preference_dataset
+import pickle
+import os
 import pytorch_lightning as pl
 import features as features_module
 import torch
@@ -161,6 +163,108 @@ class NNUEDataModule(pl.LightningDataModule):
         if self.hparams.py_data:
             return DataLoader(self.val_ds, batch_size=self.hparams.py_data_val_batch_size)
         return DataLoader(self.val_ds, batch_size=None, batch_sampler=None, num_workers=self.hparams.num_workers, persistent_workers=True)
+
+
+class PreferenceDataModule(pl.LightningDataModule):
+    """Data module that uses the C++ DLL loader for preference data."""
+
+    def __init__(
+        self,
+        train: str,
+        val: str,
+        features: str = "HalfKP",
+        num_workers: int = 16,
+        batch_size: int = 128,
+        preference_context_type: str = "elo",
+        elo_bucket_edges: tuple[int, ...] = (1200, 1600, 2000, 2400),
+        elo_weight_slope: float = 0.001,
+        elo_weight_intercept: float = 0.5,
+        elo_weight_min: float = 0.1,
+        threads: int = -1,
+    ) -> None:
+        super().__init__()
+        if threads > 0:
+            print(f"limiting torch to {threads} threads.")
+            t_set_num_threads(threads)
+        self.save_hyperparameters()
+        self.feature_set = features_module.get_feature_set_from_name(self.hparams.features)
+
+    def setup(self, stage: Optional[str] = None) -> None:
+        # The DLL reads .bin files directly; metadata is in the meta section.
+        # Create datasets that use FixedNumBatchesDataset + SparseBatchDataset
+        # with the preference binary file paths.
+        main_device = "cpu"
+        if self.trainer:
+            if self.trainer.strategy.root_device.type == "cuda":
+                main_device = f"cuda:{self.trainer.strategy.root_device.index}"
+
+        # Build preference index from H5 if .idx doesn't exist yet
+        self._build_or_verify_index(self.hparams.train, "train")
+        self._build_or_verify_index(self.hparams.val, "val")
+
+        train_bin = str(Path(self.hparams.train).with_suffix(".bin"))
+        val_bin = str(Path(self.hparams.val).with_suffix(".bin"))
+
+        epoch_size = getattr(self.hparams, "epoch_size", 10_000_000)
+        validation_size = getattr(self.hparams, "validation_size", 1_000_000)
+
+        if not Path(train_bin).exists():
+            print(f"Warning: {train_bin} not found. Using Python fallback.")
+            return
+        if not Path(val_bin).exists():
+            print(f"Warning: {val_bin} not found. Using Python fallback.")
+            return
+
+        self.train_ds = nnue_dataset.FixedNumBatchesDataset(
+            nnue_dataset.SparseBatchDataset(
+                self.hparams.features,
+                train_bin,
+                self.hparams.batch_size,
+                num_workers=self.hparams.num_workers,
+                filtered=False,
+                random_fen_skipping=0,
+                device=main_device,
+            ),
+            (epoch_size + self.hparams.batch_size - 1) // self.hparams.batch_size,
+        )
+        self.val_ds = nnue_dataset.FixedNumBatchesDataset(
+            nnue_dataset.SparseBatchDataset(
+                self.hparams.features,
+                val_bin,
+                self.hparams.batch_size,
+                filtered=False,
+                random_fen_skipping=0,
+                device=main_device,
+            ),
+            (validation_size + self.hparams.batch_size - 1) // self.hparams.batch_size,
+        )
+
+    def _build_or_verify_index(self, h5_path: str, label: str) -> None:
+        """Check that .idx file exists alongside H5; if not, warn user."""
+        idx_path = str(Path(h5_path).with_suffix(".idx"))
+        bin_path = str(Path(h5_path).with_suffix(".bin"))
+        meta_path = bin_path.replace(".bin", "_meta.bin")
+        if not Path(idx_path).exists():
+            print(f"[{label}] Index file {idx_path} not found.")
+            print(f"  Run: python /tmp/export.py {h5_path}")
+        if not Path(bin_path).exists():
+            print(f"[{label}] Binary file {bin_path} not found.")
+            print(f"  Run: python /tmp/export.py {h5_path}")
+        if not Path(meta_path).exists():
+            print(f"[{label}] Meta file {meta_path} not found.")
+            print(f"  Run: python /tmp/export.py {h5_path}")
+
+    def train_dataloader(self) -> DataLoader:
+        if not hasattr(self, "train_ds"):
+            return DataLoader([], batch_size=None)
+        return DataLoader(self.train_ds, batch_size=None, batch_sampler=None,
+                          num_workers=self.hparams.num_workers, persistent_workers=True)
+
+    def val_dataloader(self) -> DataLoader:
+        if not hasattr(self, "val_ds"):
+            return DataLoader([], batch_size=None)
+        return DataLoader(self.val_ds, batch_size=None, batch_sampler=None,
+                          num_workers=0, persistent_workers=False)
 
 class MyCLI(LightningCLI):
     def add_arguments_to_parser(self, parser) -> None:

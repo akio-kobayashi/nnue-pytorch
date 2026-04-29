@@ -8,6 +8,9 @@
 #include <thread>
 #include <deque>
 #include <random>
+#include <fstream>
+#include <vector>
+#include <cstring>
 
 #include "YaneuraOu/source/config.h"
 #include "YaneuraOu/source/usi.h"
@@ -269,6 +272,8 @@ struct SparseBatch
         white_values = new float[size * FeatureSet<Ts...>::MAX_ACTIVE_FEATURES];
         black_values = new float[size * FeatureSet<Ts...>::MAX_ACTIVE_FEATURES];
         ply = new float[size];
+        context_id = new float[size];
+        sample_weight = new float[size];
 
         num_active_white_features = 0;
         num_active_black_features = 0;
@@ -295,6 +300,8 @@ struct SparseBatch
     float* white_values;
     float* black_values;
     float* ply;
+    float* context_id;
+    float* sample_weight;
 
     ~SparseBatch()
     {
@@ -306,6 +313,8 @@ struct SparseBatch
         delete[] white_values;
         delete[] black_values;
         delete[] ply;
+        delete[] context_id;
+        delete[] sample_weight;
     }
 
 private:
@@ -566,6 +575,160 @@ extern "C" {
         fprintf(stderr, "Unknown feature_set %s\n", feature_set_c);
         return nullptr;
     }
+
+    // Preference binary file reader: reads PSV + META from separate sections
+    struct PreferenceBinaryStream : BasicSfenInputStream
+    {
+        static constexpr std::size_t PACKED_SFN_SIZE = 40;
+        static constexpr std::size_t META_SIZE = 9; // 1+2+2+2+2
+
+        PreferenceBinaryStream(std::string psv_path, std::string meta_path, bool cyclic)
+            : m_psv_stream(psv_path, std::ios::in | std::ios::binary),
+              m_meta_stream(meta_path, std::ios::in | std::ios::binary),
+              m_cyclic(cyclic), m_eof(false)
+        {
+            if (!m_psv_stream || !m_meta_stream)
+            {
+                m_eof = true;
+                return;
+            }
+            // Get file sizes to compute record count
+            m_psv_stream.seekg(0, std::ios::end);
+            m_meta_stream.seekg(0, std::ios::end);
+            std::size_t psv_size = m_psv_stream.tellg();
+            std::size_t meta_size = m_meta_stream.tellg();
+            m_num_records = psv_size / PACKED_SFN_SIZE;
+            if (meta_size != m_num_records * META_SIZE)
+            {
+                std::cerr << "Meta file size mismatch. psv=" << psv_size
+                          << " meta=" << meta_size << " records=" << m_num_records << std::endl;
+                m_eof = true;
+            }
+        }
+
+        std::optional<TrainingDataEntry> next() override
+        {
+            if (m_eof)
+                return std::nullopt;
+
+            Learner::PackedSfenValue psv;
+            if (!m_psv_stream.read(reinterpret_cast<char*>(&psv), PACKED_SFN_SIZE))
+            {
+                if (m_cyclic)
+                {
+                    m_psv_stream.clear();
+                    m_meta_stream.clear();
+                    m_psv_stream.seekg(0);
+                    m_meta_stream.seekg(0);
+                    if (!m_psv_stream.read(reinterpret_cast<char*>(&psv), PACKED_SFN_SIZE))
+                    {
+                        m_eof = true;
+                        return std::nullopt;
+                    }
+                }
+                else
+                {
+                    m_eof = true;
+                    return std::nullopt;
+                }
+            }
+
+            unsigned char meta_raw[META_SIZE];
+            if (!m_meta_stream.read(reinterpret_cast<char*>(meta_raw), META_SIZE))
+            {
+                m_eof = true;
+                return std::nullopt;
+            }
+
+            auto entry = packedSfenValueToTrainingDataEntry(psv);
+            // Parse meta: game_result(u8) + actual_move(u16) + ply(u16) + context_id(u16) + sample_weight_q12(u16)
+            std::size_t offset = 0;
+            entry.result = static_cast<int>(meta_raw[offset]) - (meta_raw[offset] == 255 ? 2 : (meta_raw[offset] == 0 ? -1 : 0));
+            // Fix: game_result 0=-1, 1=0, 2=1 (for loss/draw/win)
+            // Original format: 1=win, 0=draw, 255=loss
+            // YaneuraOu TrainingDataEntry.result: 1=win, -1=loss, 0=draw
+            if (meta_raw[offset] == 1) entry.result = 1;
+            else if (meta_raw[offset] == 0) entry.result = 0;
+            else if (meta_raw[offset] == 255) entry.result = -1;
+            else entry.result = 0;
+            offset += 1;
+
+            entry.move = static_cast<uint16_t>(meta_raw[offset]) | (static_cast<uint16_t>(meta_raw[offset+1]) << 8);
+            offset += 2;
+            entry.ply = static_cast<uint16_t>(meta_raw[offset]) | (static_cast<uint16_t>(meta_raw[offset+1]) << 8);
+            offset += 2;
+            // context_id and sample_weight_q12 are stored but not used by base TrainingDataEntry
+            // They are passed through SparseBatch directly
+            m_stored_context_id = static_cast<uint16_t>(meta_raw[offset]) | (static_cast<uint16_t>(meta_raw[offset+1]) << 8);
+            offset += 2;
+            m_stored_weight_q12 = static_cast<uint16_t>(meta_raw[offset]) | (static_cast<uint16_t>(meta_raw[offset+1]) << 8);
+
+            return entry;
+        }
+
+        bool eof() const override { return m_eof; }
+        ~PreferenceBinaryStream() override {}
+
+        uint16_t stored_context_id() const { return m_stored_context_id; }
+        uint16_t stored_weight_q12() const { return m_stored_weight_q12; }
+
+    private:
+        std::fstream m_psv_stream;
+        std::fstream m_meta_stream;
+        bool m_cyclic;
+        bool m_eof;
+        std::size_t m_num_records;
+        uint16_t m_stored_context_id = 0;
+        uint16_t m_stored_weight_q12 = 0;
+    };
+
+    // Stream that wraps a base stream and provides context_id + weight per entry
+    template <typename BaseStream>
+    class ContextAwareBatchStream
+    {
+    public:
+        ContextAwareBatchStream(int concurrency,
+                                std::unique_ptr<BaseStream> base,
+                                std::function<bool(const TrainingDataEntry&)> skipPredicate)
+            : m_concurrency(concurrency),
+              m_base(std::move(base)),
+              m_skipPredicate(skipPredicate),
+              m_cyclic(base->eof()) // will be set by fill
+        {}
+
+        std::vector<TrainingDataEntry> fill(std::size_t batch_size)
+        {
+            std::vector<TrainingDataEntry> entries;
+            entries.reserve(batch_size);
+            m_cyclic = true;
+            for (std::size_t i = 0; i < batch_size; ++i)
+            {
+                if (!m_base)
+                    break;
+                auto entry = m_base->next();
+                if (!entry.has_value())
+                {
+                    m_cyclic = false;
+                    break;
+                }
+                if (m_skipPredicate && m_skipPredicate(*entry))
+                {
+                    --i; // don't count skipped entries
+                    continue;
+                }
+                entries.push_back(*entry);
+            }
+            return entries;
+        }
+
+        uint16_t last_context_id() const { return 0; }
+
+    private:
+        int m_concurrency;
+        std::unique_ptr<BaseStream> m_base;
+        std::function<bool(const TrainingDataEntry&)> m_skipPredicate;
+        bool m_cyclic;
+    };
 
     EXPORT Stream<SparseBatch>* CDECL create_sparse_batch_stream(const char* feature_set_c, int concurrency, const char* filename, int batch_size, bool cyclic, bool filtered, int random_fen_skipping)
     {

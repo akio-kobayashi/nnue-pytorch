@@ -57,6 +57,8 @@ class SparseBatch(ctypes.Structure):
         ('white_values', ctypes.POINTER(ctypes.c_float)),
         ('black_values', ctypes.POINTER(ctypes.c_float)),
         ('ply', ctypes.POINTER(ctypes.c_float)),
+    ('context_id', ctypes.POINTER(ctypes.c_float)),
+    ('sample_weight', ctypes.POINTER(ctypes.c_float)),
     ]
 
     def get_tensors(self, device):
@@ -73,12 +75,14 @@ class SparseBatch(ctypes.Structure):
         white._coalesced_(True)
         black._coalesced_(True)
         ply = torch.from_numpy(np.ctypeslib.as_array(self.ply, shape=(self.size, 1))).to(device=device, non_blocking=True)
-        return us, them, white, black, outcome, score, ply
+        context_id = torch.from_numpy(np.ctypeslib.as_array(self.context_id, shape=(self.size, 1))).to(device=device, non_blocking=True)
+        sample_weight = torch.from_numpy(np.ctypeslib.as_array(self.sample_weight, shape=(self.size, 1))).to(device=device, non_blocking=True)
+        return us, them, white, black, outcome, score, ply, context_id, sample_weight
 
 class PythonSparseBatch:
-    def __init__(self, us, them, white, black, outcome, score, ply):
+    def __init__(self, us, them, white, black, outcome, score, ply, context_id=None, sample_weight=None):
         self.contents = self
-        self.tensors = (us, them, white, black, outcome, score, ply)
+        self.tensors = (us, them, white, black, outcome, score, ply, context_id, sample_weight)
 
     def get_tensors(self, device):
         return tuple(t.to(device) for t in self.tensors)
@@ -197,6 +201,7 @@ class TrainingDataProvider:
 
         if v:
             tensors = v.contents.get_tensors(self.device)
+            # tensors: (us, them, white, black, outcome, score, ply, context_id, sample_weight)
             self.destroy_part(v)
             return tensors
         else:

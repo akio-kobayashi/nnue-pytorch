@@ -70,6 +70,9 @@ class FixedRefH5Dataset(Dataset):
   This first slice intentionally returns only the current SFEN, actual move,
   and unified context information. Candidate generation with the fixed
   reference model V0 will be added later in the collate/batch-builder path.
+
+  The dataset supports an optional index file (.idx) to avoid rescanning
+  the HDF5 file at construction time.
   """
 
   def __init__(
@@ -91,14 +94,33 @@ class FixedRefH5Dataset(Dataset):
     self.elo_weight_intercept = float(elo_weight_intercept)
     self.elo_weight_min = float(elo_weight_min)
     self._h5: h5py.File | None = None
-    self._game_names, self._game_end_offsets = self._build_index()
+    self._idx_path = str(Path(self.h5_path).with_suffix(".idx"))
+    self._game_names, self._game_end_offsets, self._player_to_id, self._game_attrs = self._load_index_or_build()
     self._length = self._game_end_offsets[-1] if self._game_end_offsets else 0
-    self._player_to_id = self._build_player_vocab()
 
-  def _build_index(self) -> tuple[list[str], list[int]]:
+  def _load_index_or_build(self) -> tuple[list[str], list[int], dict[str, int], list[dict]]:
+    """Load index from .idx file if available, else build by scanning H5."""
+    import pickle
+    idx_path = self._idx_path
+    if Path(idx_path).exists():
+      with open(idx_path, "rb") as f:
+        idx = pickle.load(f)
+      return (
+        idx["game_names"],
+        idx["game_end_offsets"],
+        idx["player_to_id"],
+        idx["game_attrs"],
+      )
+    return self._build_index_and_vocab()
+
+  def _build_index_and_vocab(self) -> tuple[list[str], list[int], dict[str, int], list[dict]]:
+    """Scan the HDF5 file once to build the game index, player vocab, and attrs."""
     game_names: list[str] = []
     game_end_offsets: list[int] = []
+    player_set: set[str] = set()
+    game_attrs_list: list[dict] = []
     total_positions = 0
+
     with h5py.File(self.h5_path, "r") as h5_file:
       for game_name in sorted(h5_file.keys()):
         positions = h5_file[game_name].get("positions")
@@ -110,18 +132,21 @@ class FixedRefH5Dataset(Dataset):
         total_positions += num_positions
         game_names.append(game_name)
         game_end_offsets.append(total_positions)
-    return game_names, game_end_offsets
-
-  def _build_player_vocab(self) -> dict[str, int]:
-    players: set[str] = set()
-    with h5py.File(self.h5_path, "r") as h5_file:
-      for game_name in sorted(h5_file.keys()):
         attrs = h5_file[game_name].attrs
         black = _attr_to_str(attrs.get("black_player", attrs.get("player_b")))
         white = _attr_to_str(attrs.get("white_player", attrs.get("player_w")))
-        players.add(black)
-        players.add(white)
-    return {player: idx for idx, player in enumerate(sorted(players))}
+        player_set.add(black)
+        player_set.add(white)
+        game_attrs_list.append({
+          "black_player": black,
+          "white_player": white,
+          "game_result": int(attrs.get("game_result", 0)),
+          "rating_b": float(attrs.get("rating_b", 0)) if attrs.get("rating_b") is not None else None,
+          "rating_w": float(attrs.get("rating_w", 0)) if attrs.get("rating_w") is not None else None,
+        })
+
+    player_to_id = {player: idx for idx, player in enumerate(sorted(player_set))}
+    return game_names, game_end_offsets, player_to_id, game_attrs_list
 
   def _ensure_open(self) -> h5py.File:
     if self._h5 is None:
