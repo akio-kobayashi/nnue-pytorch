@@ -529,55 +529,10 @@ static void EnsureInitialize()
     is_ready();
 }
 
-extern "C" {
+namespace {
 
-    EXPORT SparseBatch* get_sparse_batch_from_fens(
-        const char* feature_set_c,
-        int num_fens,
-        const char* const* fens,
-        int* scores,
-        int* plies,
-        int* results
-    )
-    {
-        EnsureInitialize();
-
-        std::vector<TrainingDataEntry> entries;
-        entries.reserve(num_fens);
-        for (int i = 0; i < num_fens; ++i)
-        {
-            auto& e = entries.emplace_back();
-            e.pos->set(fens[i], &e.stateInfo, Threads.main());
-            //movegen::forEachLegalMove(e.pos, [&](Move m){e.move = m;});
-            e.move = MOVE_NONE;
-            e.score = scores[i];
-            e.ply = plies[i];
-            e.result = results[i];
-        }
-
-        std::string_view feature_set(feature_set_c);
-        if (feature_set == "HalfKP")
-        {
-            return new SparseBatch(FeatureSet<HalfKP>{}, entries);
-        }
-        else if (feature_set == "HalfKP^")
-        {
-            return new SparseBatch(FeatureSet<HalfKPFactorized>{}, entries);
-        }
-        // else if (feature_set == "HalfKA")
-        // {
-        //     return new SparseBatch(FeatureSet<HalfKA>{}, entries);
-        // }
-        // else if (feature_set == "HalfKA^")
-        // {
-        //     return new SparseBatch(FeatureSet<HalfKAFactorized>{}, entries);
-        // }
-        fprintf(stderr, "Unknown feature_set %s\n", feature_set_c);
-        return nullptr;
-    }
-
-    // Preference binary file reader: reads PSV + META from separate sections
-    struct PreferenceBinaryStream : BasicSfenInputStream
+    // Preference binary file reader: reads PSV + META from separate sections.
+    struct PreferenceBinaryStream : training_data::BasicSfenInputStream
     {
         static constexpr std::size_t PACKED_SFN_SIZE = 40;
         static constexpr std::size_t META_SIZE = 9; // 1+2+2+2+2
@@ -653,15 +608,16 @@ extern "C" {
             else entry.result = 0;
             offset += 1;
 
-            entry.move = static_cast<uint16_t>(meta_raw[offset]) | (static_cast<uint16_t>(meta_raw[offset+1]) << 8);
+            const auto raw_move = static_cast<uint16_t>(meta_raw[offset]) | (static_cast<uint16_t>(meta_raw[offset + 1]) << 8);
+            entry.move = static_cast<Move>(raw_move);
             offset += 2;
-            entry.ply = static_cast<uint16_t>(meta_raw[offset]) | (static_cast<uint16_t>(meta_raw[offset+1]) << 8);
+            entry.ply = static_cast<uint16_t>(meta_raw[offset]) | (static_cast<uint16_t>(meta_raw[offset + 1]) << 8);
             offset += 2;
             // context_id and sample_weight_q12 are stored but not used by base TrainingDataEntry
             // They are passed through SparseBatch directly
-            m_stored_context_id = static_cast<uint16_t>(meta_raw[offset]) | (static_cast<uint16_t>(meta_raw[offset+1]) << 8);
+            m_stored_context_id = static_cast<uint16_t>(meta_raw[offset]) | (static_cast<uint16_t>(meta_raw[offset + 1]) << 8);
             offset += 2;
-            m_stored_weight_q12 = static_cast<uint16_t>(meta_raw[offset]) | (static_cast<uint16_t>(meta_raw[offset+1]) << 8);
+            m_stored_weight_q12 = static_cast<uint16_t>(meta_raw[offset]) | (static_cast<uint16_t>(meta_raw[offset + 1]) << 8);
 
             return entry;
         }
@@ -729,6 +685,55 @@ extern "C" {
         std::function<bool(const TrainingDataEntry&)> m_skipPredicate;
         bool m_cyclic;
     };
+
+}
+
+extern "C" {
+
+    EXPORT SparseBatch* get_sparse_batch_from_fens(
+        const char* feature_set_c,
+        int num_fens,
+        const char* const* fens,
+        int* scores,
+        int* plies,
+        int* results
+    )
+    {
+        EnsureInitialize();
+
+        std::vector<TrainingDataEntry> entries;
+        entries.reserve(num_fens);
+        for (int i = 0; i < num_fens; ++i)
+        {
+            auto& e = entries.emplace_back();
+            e.pos->set(fens[i], &e.stateInfo, Threads.main());
+            //movegen::forEachLegalMove(e.pos, [&](Move m){e.move = m;});
+            e.move = MOVE_NONE;
+            e.score = scores[i];
+            e.ply = plies[i];
+            e.result = results[i];
+        }
+
+        std::string_view feature_set(feature_set_c);
+        if (feature_set == "HalfKP")
+        {
+            return new SparseBatch(FeatureSet<HalfKP>{}, entries);
+        }
+        else if (feature_set == "HalfKP^")
+        {
+            return new SparseBatch(FeatureSet<HalfKPFactorized>{}, entries);
+        }
+        // else if (feature_set == "HalfKA")
+        // {
+        //     return new SparseBatch(FeatureSet<HalfKA>{}, entries);
+        // }
+        // else if (feature_set == "HalfKA^")
+        // {
+        //     return new SparseBatch(FeatureSet<HalfKAFactorized>{}, entries);
+        // }
+        fprintf(stderr, "Unknown feature_set %s\n", feature_set_c);
+        return nullptr;
+    }
 
     EXPORT Stream<SparseBatch>* CDECL create_sparse_batch_stream(const char* feature_set_c, int concurrency, const char* filename, int batch_size, bool cyclic, bool filtered, int random_fen_skipping)
     {
