@@ -82,6 +82,20 @@ def compute_sample_weight(
     return intercept
 
 
+def _require_u16(value: int, field: str, game_name: str, position_index: int) -> int:
+    ivalue = int(value)
+    if not (0 <= ivalue <= 0xFFFF):
+        raise ValueError(
+            f"{field}={ivalue} is out of range for uint16 "
+            f"(game={game_name}, position_index={position_index})"
+        )
+    return ivalue
+
+
+def _encode_move16(move: int) -> int:
+    return int(move) & 0xFFFF
+
+
 # Core export
 
 def export(
@@ -168,8 +182,8 @@ def export(
                 psv_bytes = psv_raw.tobytes()
                 psv_data[idx * PACKED_SFN_SIZE:(idx + 1) * PACKED_SFN_SIZE] = psv_bytes
 
-                move_q = int(rec["actual_move"])
-                ply_q = int(rec["ply"])
+                move_q = _encode_move16(int(rec["actual_move"]))
+                ply_q = _require_u16(int(rec["ply"]), "ply", game_name, pi)
 
                 bd = cshogi.Board()
                 bd.set_psfen(psv_raw)
@@ -198,7 +212,13 @@ def export(
                 sample_weight = compute_sample_weight(
                     elo_val, elo_weight_slope, elo_weight_intercept, elo_weight_min
                 )
-                weight_q12 = int(sample_weight * 1000) & 0xFFFF
+                context_id = _require_u16(context_id, "context_id", game_name, pi)
+                weight_q12 = _require_u16(
+                    round(sample_weight * 1000),
+                    "sample_weight_q12",
+                    game_name,
+                    pi,
+                )
 
                 META_PACK.pack_into(
                     meta_data,

@@ -609,7 +609,7 @@ namespace {
             offset += 1;
 
             const auto raw_move = static_cast<uint16_t>(meta_raw[offset]) | (static_cast<uint16_t>(meta_raw[offset + 1]) << 8);
-            entry.move = static_cast<Move>(raw_move);
+            entry.move = entry.pos->to_move(Move16(raw_move));
             offset += 2;
             entry.ply = static_cast<uint16_t>(meta_raw[offset]) | (static_cast<uint16_t>(meta_raw[offset + 1]) << 8);
             offset += 2;
