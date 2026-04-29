@@ -41,7 +41,6 @@ def bucketize_elo(elo: float | int | None, bucket_edges: tuple[int, ...] = DEFAU
   for edge in bucket_edges:
     if value < edge:
       return bucket_id
-    bucket_id += 1
   return bucket_id
 
 
@@ -85,7 +84,7 @@ class FixedRefH5Dataset(Dataset):
       elo_weight_min: float = 0.1,
   ) -> None:
     super().__init__()
-    if context_type not in {"elo", "player"}:
+    if context_type not in {"elo", "player", "none", "bucket"}:
       raise ValueError(f"Unsupported context_type: {context_type}")
     self.h5_path = str(h5_path)
     self.context_type = context_type
@@ -176,13 +175,13 @@ class FixedRefH5Dataset(Dataset):
         context_label=player_name,
     )
 
-  def _resolve_elo_context(self, attrs: h5py.AttributeManager, turn: int) -> ContextValue:
+  def _resolve_bucket_context(self, attrs: h5py.AttributeManager, turn: int) -> ContextValue:
     elo_key = "rating_b" if turn == cshogi.BLACK else "rating_w"
     elo_value = attrs.get(elo_key)
     bucket_id = bucketize_elo(elo_value, self.elo_bucket_edges)
     bucket_label = f"elo_bucket:{bucket_id}"
     return ContextValue(
-        context_type="elo",
+        context_type="bucket",
         context_id=bucket_id,
         context_label=bucket_label,
     )
@@ -190,7 +189,15 @@ class FixedRefH5Dataset(Dataset):
   def _resolve_context(self, attrs: h5py.AttributeManager, board: cshogi.Board) -> ContextValue:
     if self.context_type == "player":
       return self._resolve_player_context(attrs, board.turn)
-    return self._resolve_elo_context(attrs, board.turn)
+    elif self.context_type == "bucket":
+      return self._resolve_bucket_context(attrs, board.turn)
+    else:
+      # elo or none: context_id = 0
+      return ContextValue(
+          context_type=self.context_type,
+          context_id=0,
+          context_label="elo" if self.context_type == "elo" else "none",
+      )
 
   def __getitem__(self, idx: int) -> FixedRefSample:
     h5_file = self._ensure_open()
