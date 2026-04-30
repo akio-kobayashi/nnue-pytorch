@@ -285,24 +285,10 @@ class NNUE(pl.LightningModule):
   def _apply_input_adapter(self, x: Tensor) -> Tensor:
     if self.input_adapter == "none" or self.input_lora_a is None or self.input_lora_b is None:
       return x.new_zeros((x.shape[0], self.input.out_features))
-    
-    # x: sparse [batch, in_features]
-    # Look up LoRA vectors for active features and aggregate per sample
-    a_vecs = self.input_lora_a(x.indices()[1])                          # [nnz, rank]
-    b_vecs = self.input_lora_b.weight.unsqueeze(1)                       # [out_features, 1, rank]
-    
+
     scale = self.input_adapter_alpha / float(self.input_adapter_rank)
-    
-    # For each feature j at index (i, j) with value v:
-    #   output[i] += v * (a_vecs[k] @ b_vecs[out_feature])
-    # Use scatter_add to aggregate contributions per sample and output dim
-    b_weights = self.input_lora_b.weight                              # [out_features, rank]
-    a_contrib = a_vecs @ b_weights.T                                   # [nnz, out_features]
-    
-    output = torch.zeros(x.shape[0], self.input.out_features, device=x.device, dtype=x.dtype)
-    output.index_add_(0, x.indices()[0], a_contrib * scale)
-    
-    return output
+    rank_features = torch.sparse.mm(x, self.input_lora_a.weight)       # [batch, rank]
+    return (rank_features @ self.input_lora_b.weight.T) * scale
 
   def _forward_hidden(
       self,
@@ -311,23 +297,10 @@ class NNUE(pl.LightningModule):
       w_in: Tensor,
       b_in: Tensor,
   ) -> Tensor:
-    # Base linear pass — manual scatter_add to avoid sparse->dense expansion
-    w_idx = w_in.indices()[0]
-    b_idx = b_in.indices()[0]
-    w_feat = w_in.indices()[1]
-    b_feat = b_in.indices()[1]
-    w_val = w_in.values()
-    b_val = b_in.values()
-    batch_size = w_in.shape[0]
-    l1_size = self.input.out_features
     iw = self.input.weight
     ib = self.input.bias
-    w_vecs = iw[w_feat]  # [nnz, l1_size]
-    b_vecs = iw[b_feat]  # [nnz, l1_size]
-    w_out = torch.zeros(batch_size, l1_size, device=w_in.device, dtype=w_in.dtype)
-    b_out = torch.zeros(batch_size, l1_size, device=b_in.device, dtype=b_in.dtype)
-    w_out.index_add_(0, w_idx, w_vecs * w_val.unsqueeze(1))
-    b_out.index_add_(0, b_idx, b_vecs * b_val.unsqueeze(1))
+    w_out = torch.sparse.mm(w_in, iw.T)
+    b_out = torch.sparse.mm(b_in, iw.T)
     if ib is not None:
       w_out = w_out + ib
       b_out = b_out + ib
