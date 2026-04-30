@@ -24,13 +24,20 @@ model:
 
 data:
   features: "HalfKP"
-  train: "data/train_preferences.h5"
-  val: "data/val_preferences.h5"
+  train: "data/train_preferences.bin"
+  val: "data/val_preferences.bin"
   batch_size: 128
   
   # Preference Dataset settings
+  # Run export_preference_data.py beforehand to produce:
+  #   data/train_preferences.bin
+  #   data/train_preferences_meta.bin
+  #   data/train_preferences.idx.pkl
+  #   data/val_preferences.bin
+  #   data/val_preferences_meta.bin
+  #   data/val_preferences.idx.pkl
   preference_data: true
-  preference_context_type: "elo"
+  preference_context_type: "bucket"
   py_data_train_num_workers: 16
   
   # Elo Bucket definition: boundaries for context_id assignment

@@ -13,6 +13,13 @@ from torch.utils.data import Dataset
 
 
 DEFAULT_ELO_BUCKETS = (1200, 1600, 2000, 2400)
+META_DTYPE = np.dtype([
+  ("game_result", np.uint8),
+  ("actual_move", "<u2"),
+  ("ply", "<u2"),
+  ("context_id", "<u2"),
+  ("sample_weight_q12", "<u2"),
+])
 
 
 @dataclass(frozen=True)
@@ -62,6 +69,29 @@ def _attr_to_str(value: Any, default: str = "unknown") -> str:
   return str(value)
 
 
+def _index_path_for_data(data_path: str | Path) -> Path:
+  path = Path(data_path)
+  if path.suffix == ".bin":
+    return path.with_suffix(".idx.pkl")
+  return path.with_suffix(".idx.pkl")
+
+
+def _load_index_file(idx_path: str | Path) -> tuple[list[str], list[int], dict[str, int], list[dict]]:
+  import pickle
+
+  with open(idx_path, "rb") as f:
+    idx = pickle.load(f)
+  game_attrs = idx.get("game_attrs", idx.get("game_meta_records"))
+  if game_attrs is None:
+    raise KeyError(f"{idx_path} is missing game_attrs/game_meta_records")
+  return (
+      idx["game_names"],
+      idx["game_end_offsets"],
+      idx["player_to_id"],
+      game_attrs,
+  )
+
+
 class FixedRefH5Dataset(Dataset):
   """
   HDF5 decision-point dataset for the fixed-reference preference route.
@@ -93,23 +123,15 @@ class FixedRefH5Dataset(Dataset):
     self.elo_weight_intercept = float(elo_weight_intercept)
     self.elo_weight_min = float(elo_weight_min)
     self._h5: h5py.File | None = None
-    self._idx_path = str(Path(self.h5_path).with_suffix(".idx"))
+    self._idx_path = str(_index_path_for_data(self.h5_path))
     self._game_names, self._game_end_offsets, self._player_to_id, self._game_attrs = self._load_index_or_build()
     self._length = self._game_end_offsets[-1] if self._game_end_offsets else 0
 
   def _load_index_or_build(self) -> tuple[list[str], list[int], dict[str, int], list[dict]]:
     """Load index from .idx file if available, else build by scanning H5."""
-    import pickle
     idx_path = self._idx_path
     if Path(idx_path).exists():
-      with open(idx_path, "rb") as f:
-        idx = pickle.load(f)
-      return (
-        idx["game_names"],
-        idx["game_end_offsets"],
-        idx["player_to_id"],
-        idx["game_attrs"],
-      )
+      return _load_index_file(idx_path)
     return self._build_index_and_vocab()
 
   def _build_index_and_vocab(self) -> tuple[list[str], list[int], dict[str, int], list[dict]]:
@@ -242,6 +264,110 @@ class FixedRefH5Dataset(Dataset):
     state = self.__dict__.copy()
     state["_h5"] = None
     return state
+
+
+class FixedRefBinaryDataset(Dataset):
+  """
+  Binary decision-point dataset for the fixed-reference preference route.
+
+  This reads records produced by export_preference_data.py:
+  - <stem>.bin
+  - <stem>_meta.bin
+  - <stem>.idx.pkl
+  """
+
+  def __init__(
+      self,
+      bin_path: str | Path,
+      context_type: str = "elo",
+      elo_bucket_edges: tuple[int, ...] = DEFAULT_ELO_BUCKETS,
+      elo_weight_slope: float = 0.001,
+      elo_weight_intercept: float = 0.5,
+      elo_weight_min: float = 0.1,
+  ) -> None:
+    super().__init__()
+    if context_type not in {"elo", "player", "none", "bucket"}:
+      raise ValueError(f"Unsupported context_type: {context_type}")
+    self.bin_path = str(bin_path)
+    self.context_type = context_type
+    self.elo_bucket_edges = tuple(int(v) for v in elo_bucket_edges)
+    self.elo_weight_slope = float(elo_weight_slope)
+    self.elo_weight_intercept = float(elo_weight_intercept)
+    self.elo_weight_min = float(elo_weight_min)
+    self._meta_path = str(Path(self.bin_path).with_name(f"{Path(self.bin_path).stem}_meta.bin"))
+    self._idx_path = str(_index_path_for_data(self.bin_path))
+    self._game_names, self._game_end_offsets, self._player_to_id, self._game_attrs = _load_index_file(self._idx_path)
+    self._id_to_player = {pid: player for player, pid in self._player_to_id.items()}
+    self._psv = np.memmap(self.bin_path, dtype=cshogi.PackedSfenValue, mode="r")
+    self._meta = np.memmap(self._meta_path, dtype=META_DTYPE, mode="r")
+    if len(self._psv) != len(self._meta):
+      raise ValueError(
+          f"Binary/meta size mismatch: {self.bin_path} has {len(self._psv)} records, "
+          f"{self._meta_path} has {len(self._meta)} records"
+      )
+    expected_length = self._game_end_offsets[-1] if self._game_end_offsets else 0
+    if len(self._psv) != expected_length:
+      raise ValueError(
+          f"Index size mismatch: {self._idx_path} expects {expected_length} records, "
+          f"but {self.bin_path} has {len(self._psv)}"
+      )
+    self._length = len(self._psv)
+
+  def __len__(self) -> int:
+    return self._length
+
+  def _resolve_index(self, idx: int) -> tuple[int, int]:
+    if idx < 0:
+      idx += self._length
+    if idx < 0 or idx >= self._length:
+      raise IndexError(idx)
+    game_idx = bisect.bisect_right(self._game_end_offsets, idx)
+    game_start = 0 if game_idx == 0 else self._game_end_offsets[game_idx - 1]
+    return game_idx, idx - game_start
+
+  def _resolve_context_label(self, game_attrs: dict[str, Any], board: cshogi.Board, context_id: int) -> str:
+    if self.context_type == "player":
+      if board.turn == cshogi.BLACK:
+        return _attr_to_str(game_attrs.get("black_player"))
+      return _attr_to_str(game_attrs.get("white_player"))
+    if self.context_type == "bucket":
+      return f"elo_bucket:{context_id}"
+    return "elo" if self.context_type == "elo" else "none"
+
+  def __getitem__(self, idx: int) -> FixedRefSample:
+    game_idx, _pos_idx = self._resolve_index(idx)
+    game_name = self._game_names[game_idx]
+    game_attrs = self._game_attrs[game_idx]
+    psv = self._psv[idx]
+    meta = self._meta[idx]
+
+    board = cshogi.Board()
+    board.set_psfen(psv["sfen"])
+    sfen = board.sfen()
+
+    context_id = int(meta["context_id"])
+    context = ContextValue(
+        context_type=self.context_type,
+        context_id=context_id,
+        context_label=self._resolve_context_label(game_attrs, board, context_id),
+    )
+
+    metadata = {
+        "game_name": game_name,
+        "file_path": _attr_to_str(game_attrs.get("file_path"), default=""),
+        "kif_index": int(game_attrs.get("kif_index", 0)),
+        "rating_b": game_attrs.get("rating_b"),
+        "rating_w": game_attrs.get("rating_w"),
+    }
+    return FixedRefSample(
+        sfen=sfen,
+        actual_move=int(meta["actual_move"]),
+        ply=int(meta["ply"]),
+        game_result=int(meta["game_result"]),
+        context=context,
+        sample_weight=float(meta["sample_weight_q12"]) / 1000.0,
+        metadata=metadata,
+    )
 
 
 def fixed_ref_sample_to_dict(sample: FixedRefSample) -> dict[str, Any]:

@@ -73,7 +73,12 @@ class NNUEDataModule(pl.LightningDataModule):
                 main_device = f"cuda:{self.trainer.strategy.root_device.index}"
 
         if self.hparams.preference_data:
-            self.train_ds = preference_dataset.FixedRefH5Dataset(
+            ds_cls = (
+                preference_dataset.FixedRefBinaryDataset
+                if Path(self.hparams.train).suffix == ".bin"
+                else preference_dataset.FixedRefH5Dataset
+            )
+            self.train_ds = ds_cls(
                 self.hparams.train,
                 context_type=self.hparams.preference_context_type,
                 elo_bucket_edges=self.hparams.elo_bucket_edges,
@@ -81,7 +86,12 @@ class NNUEDataModule(pl.LightningDataModule):
                 elo_weight_intercept=self.hparams.elo_weight_intercept,
                 elo_weight_min=self.hparams.elo_weight_min,
             )
-            self.val_ds = preference_dataset.FixedRefH5Dataset(
+            val_ds_cls = (
+                preference_dataset.FixedRefBinaryDataset
+                if Path(self.hparams.val).suffix == ".bin"
+                else preference_dataset.FixedRefH5Dataset
+            )
+            self.val_ds = val_ds_cls(
                 self.hparams.val,
                 context_type=self.hparams.preference_context_type,
                 elo_bucket_edges=self.hparams.elo_bucket_edges,
