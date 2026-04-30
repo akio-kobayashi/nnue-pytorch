@@ -299,9 +299,8 @@ class NNUE(pl.LightningModule):
     b_weights = self.input_lora_b.weight                              # [out_features, rank]
     a_contrib = a_vecs @ b_weights.T                                   # [nnz, out_features]
     
-    batch_idx = x.indices()[0].unsqueeze(1).expand_as(a_contrib)       # [nnz, out_features]
     output = torch.zeros(x.shape[0], self.input.out_features, device=x.device, dtype=x.dtype)
-    output.scatter_add_(0, batch_idx, a_contrib * scale)
+    output.index_add_(0, x.indices()[0], a_contrib * scale)
     
     return output
 
@@ -327,8 +326,8 @@ class NNUE(pl.LightningModule):
     b_vecs = iw[b_feat]  # [nnz, l1_size]
     w_out = torch.zeros(batch_size, l1_size, device=w_in.device, dtype=w_in.dtype)
     b_out = torch.zeros(batch_size, l1_size, device=b_in.device, dtype=b_in.dtype)
-    w_out.scatter_reduce_(0, w_idx.unsqueeze(1).expand_as(w_vecs), w_vecs * w_val.unsqueeze(1), reduce='sum', include_self=False)
-    b_out.scatter_reduce_(0, b_idx.unsqueeze(1).expand_as(b_vecs), b_vecs * b_val.unsqueeze(1), reduce='sum', include_self=False)
+    w_out.index_add_(0, w_idx, w_vecs * w_val.unsqueeze(1))
+    b_out.index_add_(0, b_idx, b_vecs * b_val.unsqueeze(1))
     if ib is not None:
       w_out = w_out + ib
       b_out = b_out + ib
