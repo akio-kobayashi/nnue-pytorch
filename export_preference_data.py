@@ -30,9 +30,7 @@ Output files:
 from __future__ import annotations
 
 import argparse
-import os
 import pickle
-import struct
 import sys
 from pathlib import Path
 
@@ -44,7 +42,13 @@ import numpy as np
 PACKED_SFN_SIZE = 40
 META_SIZE = 9  # 1 (u8) + 4*2 (u16)
 
-META_PACK = struct.Struct("<BHHHH")  # game_result, move, ply, context_id, weight_q12
+META_DTYPE = np.dtype([
+    ("game_result", np.uint8),
+    ("actual_move", "<u2"),
+    ("ply", "<u2"),
+    ("context_id", "<u2"),
+    ("sample_weight_q12", "<u2"),
+])  # game_result, move, ply, context_id, weight_q12
 
 DEFAULT_ELO_BUCKETS = (1200, 1600, 2000, 2400)
 
@@ -82,18 +86,14 @@ def compute_sample_weight(
     return intercept
 
 
-def _require_u16(value: int, field: str, game_name: str, position_index: int) -> int:
-    ivalue = int(value)
-    if not (0 <= ivalue <= 0xFFFF):
-        raise ValueError(
-            f"{field}={ivalue} is out of range for uint16 "
-            f"(game={game_name}, position_index={position_index})"
-        )
-    return ivalue
-
-
-def _encode_move16(move: int) -> int:
-    return int(move) & 0xFFFF
+def _extract_turn_ids(psv_array: np.ndarray) -> np.ndarray:
+    """Decode side-to-move from PackedSfenValue records."""
+    board = cshogi.Board()
+    turns = np.empty(len(psv_array), dtype=np.uint8)
+    for i, psv in enumerate(psv_array):
+        board.set_psfen(np.asarray(psv, dtype=cshogi.PackedSfenValue).reshape(1))
+        turns[i] = board.turn
+    return turns
 
 
 # Core export
@@ -162,100 +162,111 @@ def export(
             player_to_id = {}
 
     # Pass 2: extract PSV and META records
-    psv_data = bytearray(PACKED_SFN_SIZE * total)
-    meta_data = bytearray(META_SIZE * total)
+    psv_data: np.ndarray | None = None
+    meta_data = np.empty(total, dtype=META_DTYPE)
 
     idx = 0
     with h5py.File(h5_path, "r") as h5:
         for gi, game_name in enumerate(game_names):
             grp = h5[game_name]
-            positions = grp["positions"]
+            positions_ds = grp["positions"]
+            positions = positions_ds[:]
             attrs = grp.attrs
+
+            n = len(positions)
+            if n == 0:
+                continue
+            if psv_data is None:
+                psv_data = np.empty(total, dtype=positions["psv"].dtype)
 
             game_result = int(attrs.get("game_result", 0))
             rating_b = game_meta_records[gi]["rating_b"]
             rating_w = game_meta_records[gi]["rating_w"]
+            black_player = game_meta_records[gi]["black_player"]
+            white_player = game_meta_records[gi]["white_player"]
 
-            for pi in range(len(positions)):
-                rec = positions[pi]
-                psv_raw = np.asarray(rec["psv"], dtype=cshogi.PackedSfenValue).reshape(1)
-                psv_bytes = psv_raw.tobytes()
-                psv_data[idx * PACKED_SFN_SIZE:(idx + 1) * PACKED_SFN_SIZE] = psv_bytes
+            psv_chunk = positions["psv"]
+            actual_moves = positions["actual_move"].astype(np.uint16, copy=False)
+            plys_raw = positions["ply"]
 
-                move_q = _encode_move16(int(rec["actual_move"]))
-                ply_q = _require_u16(int(rec["ply"]), "ply", game_name, pi)
+            psv_data[idx:idx + n] = psv_chunk
 
-                bd = cshogi.Board()
-                bd.set_psfen(psv_raw)
-                turn = bd.turn
+            meta_slice = meta_data[idx:idx + n]
+            meta_slice["game_result"] = game_result
+            meta_slice["actual_move"] = actual_moves
 
-                if context_type == "player":
-                    pkey = "black_player" if turn == cshogi.BLACK else "white_player"
-                    fkey = "player_b" if turn == cshogi.BLACK else "player_w"
-                    player_name = _attr_str(attrs.get(pkey, attrs.get(fkey)))
-                    context_id = player_to_id.get(player_name, player_to_id.get("unknown", 0))
-                elif context_type == "bucket":
-                    elo_key = "rating_b" if turn == cshogi.BLACK else "rating_w"
-                    elo_value = rating_b if elo_key == "rating_b" else rating_w
-                    context_id = bucketize_elo(elo_value, elo_bucket_edges)
-                else:
-                    # elo or none: no bucketing, context_id = 0
-                    context_id = 0
-
-                # Compute sample_weight
-                if context_type == "player":
-                    elo_val = rating_b if rating_b is not None else 1500.0
-                else:
-                    elo_val = rating_b if rating_b is not None else (
-                        rating_w if rating_w is not None else 1500.0
-                    )
-                sample_weight = compute_sample_weight(
-                    elo_val, elo_weight_slope, elo_weight_intercept, elo_weight_min
+            plys = np.asarray(plys_raw, dtype=np.int64)
+            if np.any((plys < 0) | (plys > 0xFFFF)):
+                bad = int(np.flatnonzero((plys < 0) | (plys > 0xFFFF))[0])
+                raise ValueError(
+                    f"ply={int(plys[bad])} is out of range for uint16 "
+                    f"(game={game_name}, position_index={bad})"
                 )
-                context_id = _require_u16(context_id, "context_id", game_name, pi)
-                weight_q12 = _require_u16(
-                    round(sample_weight * 1000),
-                    "sample_weight_q12",
-                    game_name,
-                    pi,
-                )
+            meta_slice["ply"] = plys.astype(np.uint16, copy=False)
 
-                META_PACK.pack_into(
-                    meta_data,
-                    idx * META_SIZE,
-                    game_result, move_q, ply_q, context_id, weight_q12,
-                )
+            if context_type == "player":
+                turns = _extract_turn_ids(psv_chunk)
+                context_ids = np.where(
+                    turns == cshogi.BLACK,
+                    player_to_id.get(black_player, player_to_id.get("unknown", 0)),
+                    player_to_id.get(white_player, player_to_id.get("unknown", 0)),
+                ).astype(np.uint16, copy=False)
+            elif context_type == "bucket":
+                turns = _extract_turn_ids(psv_chunk)
+                black_bucket = bucketize_elo(rating_b, elo_bucket_edges)
+                white_bucket = bucketize_elo(rating_w, elo_bucket_edges)
+                context_ids = np.where(
+                    turns == cshogi.BLACK,
+                    black_bucket,
+                    white_bucket,
+                ).astype(np.uint16, copy=False)
+            else:
+                # elo or none: no bucketing, context_id = 0
+                context_ids = np.zeros(n, dtype=np.uint16)
 
-                idx += 1
+            max_context_id = int(context_ids.max())
+            if max_context_id > 0xFFFF:
+                raise ValueError(
+                    f"context_id={max_context_id} is out of range for uint16 "
+                    f"(game={game_name})"
+                )
+            meta_slice["context_id"] = context_ids
+
+            if context_type == "player":
+                elo_val = rating_b if rating_b is not None else 1500.0
+            else:
+                elo_val = rating_b if rating_b is not None else (
+                    rating_w if rating_w is not None else 1500.0
+                )
+            sample_weight = compute_sample_weight(
+                elo_val, elo_weight_slope, elo_weight_intercept, elo_weight_min
+            )
+            weight_q12 = round(sample_weight * 1000)
+            if not (0 <= weight_q12 <= 0xFFFF):
+                raise ValueError(
+                    f"sample_weight_q12={weight_q12} is out of range for uint16 "
+                    f"(game={game_name})"
+                )
+            meta_slice["sample_weight_q12"] = weight_q12
+
+            idx += n
 
     print(f"Pass 2: extracted {idx} records")
+    if psv_data is None:
+        psv_data = np.empty(0, dtype=np.dtype(f"V{PACKED_SFN_SIZE}"))
 
     # Shuffle
     if shuffle:
-        rng = list(range(total))
-        import random as _random
-        _random.Random(seed).shuffle(rng)
-
-        shuffled_psv = bytearray(PACKED_SFN_SIZE * total)
-        shuffled_meta = bytearray(META_SIZE * total)
-        for new_idx, old_idx in enumerate(rng):
-            so = old_idx * PACKED_SFN_SIZE
-            sn = new_idx * PACKED_SFN_SIZE
-            shuffled_psv[sn:sn + PACKED_SFN_SIZE] = psv_data[so:so + PACKED_SFN_SIZE]
-
-            mo = old_idx * META_SIZE
-            mn = new_idx * META_SIZE
-            shuffled_meta[mn:mn + META_SIZE] = meta_data[mo:mo + META_SIZE]
-
-        psv_data = shuffled_psv
-        meta_data = shuffled_meta
+        rng = np.random.default_rng(seed).permutation(total)
+        psv_data = psv_data[rng]
+        meta_data = meta_data[rng]
 
     # Write binary files
     with open(psv_path, "wb") as f:
-        f.write(psv_data)
+        psv_data.tofile(f)
 
     with open(meta_path, "wb") as f:
-        f.write(meta_data)
+        meta_data.tofile(f)
 
     # Write index file (for Python fallback / verification)
     game_end_offsets: list[int] = []
@@ -276,8 +287,8 @@ def export(
     with open(idx_path, "wb") as f:
         pickle.dump(idx_obj, f)
 
-    print(f"Written: {psv_path} ({len(psv_data)} bytes)")
-    print(f"Written: {meta_path} ({len(meta_data)} bytes)")
+    print(f"Written: {psv_path} ({psv_data.nbytes} bytes)")
+    print(f"Written: {meta_path} ({meta_data.nbytes} bytes)")
     print(f"Written: {idx_path} ({len(game_names)} games)")
     return psv_path
 
