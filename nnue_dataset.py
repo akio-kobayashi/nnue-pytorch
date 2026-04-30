@@ -85,7 +85,7 @@ class PythonSparseBatch:
         self.tensors = (us, them, white, black, outcome, score, ply, context_id, sample_weight)
 
     def get_tensors(self, device):
-        return tuple(t.to(device) for t in self.tensors)
+        return tuple(t.to(device) if t is not None else None for t in self.tensors)
 
 def _extract_halfkp_indices(sfen, feature_set_name):
     import cshogi

@@ -497,7 +497,8 @@ class NNUE(pl.LightningModule):
     results = [0 for _ in fens]
     batch = nnue_dataset.make_sparse_batch_from_fens(self.feature_set, fens, scores, plies, results)
     try:
-      us, them, white, black, _outcome, _score, _ply = batch.contents.get_tensors(device)
+      tensors = batch.contents.get_tensors(device)
+      us, them, white, black, _outcome, _score, _ply = tensors[:7]
     finally:
       nnue_dataset.destroy_sparse_batch(batch)
     return us, them, white, black
