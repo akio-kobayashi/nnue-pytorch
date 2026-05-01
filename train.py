@@ -160,7 +160,9 @@ class NNUEDataModule(pl.LightningDataModule):
                 sampler=sampler,
                 num_workers=self.hparams.py_data_train_num_workers,
             )
-        return DataLoader(self.train_ds, batch_size=None, batch_sampler=None, num_workers=self.hparams.num_workers, persistent_workers=True)
+        # The C++ loader already owns its own worker threads and prefetch queue.
+        # Adding DataLoader worker processes on top multiplies memory usage.
+        return DataLoader(self.train_ds, batch_size=None, batch_sampler=None, num_workers=0, persistent_workers=False)
 
     def val_dataloader(self) -> DataLoader:
         if self.hparams.preference_data:
@@ -172,7 +174,7 @@ class NNUEDataModule(pl.LightningDataModule):
             )
         if self.hparams.py_data:
             return DataLoader(self.val_ds, batch_size=self.hparams.py_data_val_batch_size)
-        return DataLoader(self.val_ds, batch_size=None, batch_sampler=None, num_workers=self.hparams.num_workers, persistent_workers=True)
+        return DataLoader(self.val_ds, batch_size=None, batch_sampler=None, num_workers=0, persistent_workers=False)
 
 
 class PreferenceDataModule(pl.LightningDataModule):
@@ -259,7 +261,7 @@ class PreferenceDataModule(pl.LightningDataModule):
         if not hasattr(self, "train_ds"):
             return DataLoader([], batch_size=None)
         return DataLoader(self.train_ds, batch_size=None, batch_sampler=None,
-                          num_workers=self.hparams.num_workers, persistent_workers=True)
+                          num_workers=0, persistent_workers=False)
 
     def val_dataloader(self) -> DataLoader:
         if not hasattr(self, "val_ds"):
