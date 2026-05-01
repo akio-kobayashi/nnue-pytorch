@@ -35,7 +35,7 @@ class NNUE(pl.LightningModule):
       corn_aux_weight: float = 0.0, corn_aux_thresholds: list[float] | None = None,
       king_zone_aux_weight: float = 0.0, major_safety_aux_weight: float = 0.0,
       preference_route: str = "none", preference_weight: float = 1.0, preference_beta: float = 1.0,
-      fixed_ref_max_legal_moves: int = 0, preference_num_contexts: int = 8,
+      fixed_ref_max_legal_moves: int = 0, fixed_ref_candidate_chunk_size: int = 0, preference_num_contexts: int = 8,
       preference_delta_scale: float = 1.0, base_ckpt: str = "", use_ema_weights: bool = False,
       input_adapter: str = "none", input_adapter_rank: int = 8, input_adapter_alpha: float = 1.0,
       input_adapter_init_std: float = 1e-3, freeze_base_input: bool = False):
@@ -91,6 +91,7 @@ class NNUE(pl.LightningModule):
     self.preference_weight = max(float(preference_weight), 0.0)
     self.preference_beta = float(preference_beta)
     self.fixed_ref_max_legal_moves = max(int(fixed_ref_max_legal_moves), 0)
+    self.fixed_ref_candidate_chunk_size = max(int(fixed_ref_candidate_chunk_size), 0)
     self.preference_num_contexts = max(int(preference_num_contexts), 1)
     self.preference_delta_scale = float(preference_delta_scale)
     self.context_embedding = (
@@ -520,12 +521,52 @@ class NNUE(pl.LightningModule):
     board.push(move_int)
     return board.sfen()
 
-  def _build_fixed_ref_pairs(self, batch: dict[str, Any], device: torch.device) -> tuple[list[str], list[str], list[int], list[int], Tensor]:
+  def _select_fixed_ref_candidate(
+      self,
+      candidate_fens: list[str],
+      candidate_plies: list[int],
+      device: torch.device,
+  ) -> int:
+    if not candidate_fens:
+      raise ValueError("candidate_fens must not be empty")
+
+    chunk_size = self.fixed_ref_candidate_chunk_size
+    if chunk_size <= 0:
+      chunk_size = len(candidate_fens)
+
+    best_score: Tensor | None = None
+    best_index = 0
+
+    for start in range(0, len(candidate_fens), chunk_size):
+      end = min(start + chunk_size, len(candidate_fens))
+      us, them, white, black = self._make_sparse_tensors_from_fens(
+          candidate_fens[start:end],
+          candidate_plies[start:end],
+          device,
+      )
+      with torch.no_grad():
+        # After one move, side-to-move is the opponent, so negate to recover
+        # the original mover's utility.
+        ref_utilities = -self._fixed_ref_forward(us, them, white, black).reshape(-1)
+      local_best = int(torch.argmax(ref_utilities).item())
+      local_score = ref_utilities[local_best]
+      if best_score is None or local_score.item() > best_score.item():
+        best_score = local_score
+        best_index = start + local_best
+
+    return best_index
+
+  def _build_fixed_ref_pairs(
+      self,
+      batch: dict[str, Any],
+      device: torch.device,
+  ) -> tuple[list[str], list[str], list[int], list[int], Tensor, int]:
     actual_fens: list[str] = []
     ref_fens: list[str] = []
     pair_plies: list[int] = []
     pair_context_ids: list[int] = []
     pair_weights: list[float] = []
+    total_candidates = 0
     
     sfens = batch["sfen"]
     actual_moves = batch["actual_move"].detach().cpu().tolist()
@@ -544,19 +585,8 @@ class NNUE(pl.LightningModule):
 
       candidate_fens = [candidate_sfen for _move, candidate_sfen in candidates]
       candidate_plies = [int(ply) + 1 for _ in candidate_fens]
-      
-      # Batch evaluate all candidates at once using C++ sparse batch generation
-      all_fens = candidate_fens
-      all_plies = candidate_plies
-      us, them, white, black = self._make_sparse_tensors_from_fens(all_fens, all_plies, device)
-      with torch.no_grad():
-        q = self._fixed_ref_forward(us, them, white, black).reshape(-1)
-      ref_scores = q
-      
-      # The network output is side-to-move oriented. After one move, the side to
-      # move is the opponent, so the original mover's utility is the negative score.
-      ref_utilities = -ref_scores
-      best_index = int(torch.argmax(ref_utilities).item())
+      total_candidates += len(candidate_fens)
+      best_index = self._select_fixed_ref_candidate(candidate_fens, candidate_plies, device)
 
       actual_fens.append(actual_after)
       ref_fens.append(candidate_fens[best_index])
@@ -564,7 +594,14 @@ class NNUE(pl.LightningModule):
       pair_context_ids.append(int(context_id))
       pair_weights.append(float(weight))
 
-    return actual_fens, ref_fens, pair_plies, pair_context_ids, torch.tensor(pair_weights, device=device)
+    return (
+        actual_fens,
+        ref_fens,
+        pair_plies,
+        pair_context_ids,
+        torch.tensor(pair_weights, device=device),
+        total_candidates,
+    )
 
   def _score_fens_with_current_context(
       self,
@@ -593,11 +630,12 @@ class NNUE(pl.LightningModule):
   def _step_fixed_ref(self, batch: dict[str, Any], loss_type: str) -> Tensor:
     param = next(self.parameters())
     device = param.device
-    actual_fens, ref_fens, pair_plies, pair_context_ids, weights = self._build_fixed_ref_pairs(batch, device)
+    actual_fens, ref_fens, pair_plies, pair_context_ids, weights, total_candidates = self._build_fixed_ref_pairs(batch, device)
     if not actual_fens:
       loss = self._zero_loss_with_grad()
       self.log(loss_type, loss)
-      self.log(f"{loss_type}_fixed_ref_pairs", 0.0)
+      self.log(f"{loss_type}_fixed_ref_pairs", 0.0, on_step=True, on_epoch=False, batch_size=1)
+      self.log(f"{loss_type}_fixed_ref_candidates", float(total_candidates), on_step=True, on_epoch=False, batch_size=1)
       return loss
 
     actual_q = self._score_fens_with_current_context(actual_fens, pair_plies, pair_context_ids, device)
@@ -613,7 +651,8 @@ class NNUE(pl.LightningModule):
     loss = self.preference_weight * pref_loss
     self.log(loss_type, loss)
     self.log(f"{loss_type}_fixed_ref_pref", pref_loss)
-    self.log(f"{loss_type}_fixed_ref_pairs", float(len(actual_fens)))
+    self.log(f"{loss_type}_fixed_ref_pairs", float(len(actual_fens)), on_step=True, on_epoch=False, batch_size=1)
+    self.log(f"{loss_type}_fixed_ref_candidates", float(total_candidates), on_step=True, on_epoch=False, batch_size=1)
     return loss
 
   def _iter_ema_parameters(self) -> Iterator[tuple[str, Tensor]]:
@@ -663,6 +702,34 @@ class NNUE(pl.LightningModule):
         param.copy_(original.to(device=param.device, dtype=param.dtype))
     self._ema_backup = None
 
+  def _cuda_memory_device_index(self) -> int | None:
+    device = next(self.parameters()).device
+    if device.type != "cuda" or device.index is None:
+      return None
+    return int(device.index)
+
+  def _reset_cuda_peak_memory_stats(self) -> None:
+    device_index = self._cuda_memory_device_index()
+    if device_index is None:
+      return
+    torch.cuda.reset_peak_memory_stats(device=device_index)
+
+  def _log_cuda_memory_stats(self, prefix: str) -> None:
+    device_index = self._cuda_memory_device_index()
+    if device_index is None:
+      return
+
+    mb = 1024.0 * 1024.0
+    allocated = torch.cuda.memory_allocated(device=device_index) / mb
+    reserved = torch.cuda.memory_reserved(device=device_index) / mb
+    peak_allocated = torch.cuda.max_memory_allocated(device=device_index) / mb
+    peak_reserved = torch.cuda.max_memory_reserved(device=device_index) / mb
+
+    self.log(f"{prefix}_cuda_mem_allocated_mb", allocated, on_step=True, on_epoch=False, batch_size=1)
+    self.log(f"{prefix}_cuda_mem_reserved_mb", reserved, on_step=True, on_epoch=False, batch_size=1)
+    self.log(f"{prefix}_cuda_mem_peak_allocated_mb", peak_allocated, on_step=True, on_epoch=False, batch_size=1)
+    self.log(f"{prefix}_cuda_mem_peak_reserved_mb", peak_reserved, on_step=True, on_epoch=False, batch_size=1)
+
   def training_step(self, batch: Batch, batch_idx: int) -> Tensor:
     return self.step_(batch, batch_idx, 'train_loss')
 
@@ -675,7 +742,11 @@ class NNUE(pl.LightningModule):
     if self.ema_enabled:
       self._initialize_ema_state()
 
+  def on_train_batch_start(self, batch: Batch, batch_idx: int) -> None:
+    self._reset_cuda_peak_memory_stats()
+
   def on_train_batch_end(self, outputs: Any, batch: Batch, batch_idx: int) -> None:
+    self._log_cuda_memory_stats("train")
     if not self.ema_enabled:
       return
     global_step = self.trainer.global_step
@@ -688,6 +759,12 @@ class NNUE(pl.LightningModule):
   def on_validation_epoch_start(self) -> None:
     if self.ema_enabled:
       self.apply_ema_weights()
+
+  def on_validation_batch_start(self, batch: Batch, batch_idx: int) -> None:
+    self._reset_cuda_peak_memory_stats()
+
+  def on_validation_batch_end(self, outputs: Any, batch: Batch, batch_idx: int) -> None:
+    self._log_cuda_memory_stats("val")
   
   def on_validation_epoch_end(self) -> None:
     try:
@@ -702,6 +779,12 @@ class NNUE(pl.LightningModule):
   def on_test_epoch_start(self) -> None:
     if self.ema_enabled:
       self.apply_ema_weights()
+
+  def on_test_batch_start(self, batch: Batch, batch_idx: int) -> None:
+    self._reset_cuda_peak_memory_stats()
+
+  def on_test_batch_end(self, outputs: Any, batch: Batch, batch_idx: int) -> None:
+    self._log_cuda_memory_stats("test")
 
   def on_test_epoch_end(self) -> None:
     self.restore_original_weights()

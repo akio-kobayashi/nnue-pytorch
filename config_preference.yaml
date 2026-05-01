@@ -11,6 +11,7 @@ model:
   preference_beta: 1.0           # Scaling for Bradley-Terry logits
   preference_num_contexts: 5
   fixed_ref_max_legal_moves: 20
+  fixed_ref_candidate_chunk_size: 8
   
   # Conditional LoRA at the input layer (Feature Transformer)
   input_adapter: "halfkp_lora"
