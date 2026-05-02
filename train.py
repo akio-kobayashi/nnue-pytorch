@@ -7,6 +7,7 @@ import os
 import pytorch_lightning as pl
 import features as features_module
 import torch
+import sys
 import yaml
 from pathlib import Path
 from typing import Any, Optional
@@ -366,6 +367,11 @@ def _run_cli_subcommand(cli: LightningCLI) -> None:
 
 
 def main():
+    argv = list(sys.argv[1:])
+    requested_subcommand = "fit"
+    if argv and argv[0] in {"fit", "validate", "test", "predict"}:
+        requested_subcommand = argv.pop(0)
+
     # LightningCLI will add arguments for the model, datamodule, and trainer.
     # It will also handle seeding and checkpointing.
     # All model/data/trainer arguments are now passed through the command line
@@ -376,13 +382,15 @@ def main():
             M.NNUE,
             NNUEDataModule,
             run=False,
+            args=argv,
             parser_kwargs={"fit": {"default_config_files": ["config.yaml"]}},
             **cli_kwargs,
         )
     except TypeError as exc:
         if "default_config_files" not in str(exc):
             raise
-        cli = MyCLI(M.NNUE, NNUEDataModule, run=False, **cli_kwargs)
+        cli = MyCLI(M.NNUE, NNUEDataModule, run=False, args=argv, **cli_kwargs)
+    cli.subcommand = requested_subcommand
     cli.trainer.callbacks.append(HParamsSnapshotCallback(cli.config))
     _run_cli_subcommand(cli)
 
