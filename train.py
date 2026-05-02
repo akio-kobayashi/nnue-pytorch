@@ -348,6 +348,23 @@ class MyCLI(LightningCLI):
         parser.link_arguments("data.features", "model.features")
 
 
+def _run_cli_subcommand(cli: LightningCLI) -> None:
+    subcommand = getattr(cli, "subcommand", None) or "fit"
+    if subcommand == "fit":
+        cli.trainer.fit(cli.model, datamodule=cli.datamodule)
+        return
+    if subcommand == "validate":
+        cli.trainer.validate(cli.model, datamodule=cli.datamodule)
+        return
+    if subcommand == "test":
+        cli.trainer.test(cli.model, datamodule=cli.datamodule)
+        return
+    if subcommand == "predict":
+        cli.trainer.predict(cli.model, datamodule=cli.datamodule)
+        return
+    raise ValueError(f"Unsupported CLI subcommand: {subcommand}")
+
+
 def main():
     # LightningCLI will add arguments for the model, datamodule, and trainer.
     # It will also handle seeding and checkpointing.
@@ -367,7 +384,7 @@ def main():
             raise
         cli = MyCLI(M.NNUE, NNUEDataModule, run=False, **cli_kwargs)
     cli.trainer.callbacks.append(HParamsSnapshotCallback(cli.config))
-    cli.trainer.fit(cli.model, datamodule=cli.datamodule)
+    _run_cli_subcommand(cli)
 
 if __name__ == "__main__":
     main()
