@@ -35,7 +35,8 @@ class NNUE(pl.LightningModule):
       corn_aux_weight: float = 0.0, corn_aux_thresholds: list[float] | None = None,
       king_zone_aux_weight: float = 0.0, major_safety_aux_weight: float = 0.0,
       preference_route: str = "none", preference_weight: float = 1.0, preference_beta: float = 1.0,
-      fixed_ref_max_legal_moves: int = 0, fixed_ref_candidate_chunk_size: int = 0, preference_num_contexts: int = 8,
+      fixed_ref_max_legal_moves: int = 0, fixed_ref_val_max_legal_moves: int = -1,
+      fixed_ref_candidate_chunk_size: int = 0, preference_num_contexts: int = 8,
       preference_delta_scale: float = 1.0, base_ckpt: str = "", use_ema_weights: bool = False,
       input_adapter: str = "none", input_adapter_rank: int = 8, input_adapter_alpha: float = 1.0,
       input_adapter_init_std: float = 1e-3, freeze_base_input: bool = False):
@@ -91,6 +92,7 @@ class NNUE(pl.LightningModule):
     self.preference_weight = max(float(preference_weight), 0.0)
     self.preference_beta = float(preference_beta)
     self.fixed_ref_max_legal_moves = max(int(fixed_ref_max_legal_moves), 0)
+    self.fixed_ref_val_max_legal_moves = int(fixed_ref_val_max_legal_moves)
     self.fixed_ref_candidate_chunk_size = max(int(fixed_ref_candidate_chunk_size), 0)
     self.preference_num_contexts = max(int(preference_num_contexts), 1)
     self.preference_delta_scale = float(preference_delta_scale)
@@ -499,7 +501,14 @@ class NNUE(pl.LightningModule):
     return F.linear(l2_, output_weight, output_bias)
 
 
-  def _iter_candidate_after_fens(self, sfen: str, actual_move: int) -> list[tuple[int, str]]:
+  def _current_fixed_ref_max_legal_moves(self, loss_type: str) -> int:
+    if loss_type.startswith("val_") and self.fixed_ref_val_max_legal_moves >= 0:
+      return self.fixed_ref_val_max_legal_moves
+    if loss_type.startswith("test_") and self.fixed_ref_val_max_legal_moves >= 0:
+      return self.fixed_ref_val_max_legal_moves
+    return self.fixed_ref_max_legal_moves
+
+  def _iter_candidate_after_fens(self, sfen: str, actual_move: int, max_legal_moves: int) -> list[tuple[int, str]]:
     board = cshogi.Board(sfen)
     candidates: list[tuple[int, str]] = []
     for move in board.legal_moves:
@@ -509,7 +518,7 @@ class NNUE(pl.LightningModule):
       board.push(move_int)
       candidates.append((move_int, board.sfen()))
       board.pop()
-      if self.fixed_ref_max_legal_moves > 0 and len(candidates) >= self.fixed_ref_max_legal_moves:
+      if max_legal_moves > 0 and len(candidates) >= max_legal_moves:
         break
     return candidates
 
@@ -560,6 +569,7 @@ class NNUE(pl.LightningModule):
       self,
       batch: dict[str, Any],
       device: torch.device,
+      loss_type: str,
   ) -> tuple[list[str], list[str], list[int], list[int], Tensor, int]:
     actual_fens: list[str] = []
     ref_fens: list[str] = []
@@ -573,13 +583,14 @@ class NNUE(pl.LightningModule):
     plies = batch["ply"].reshape(-1).detach().cpu().int().tolist()
     context_ids = batch["context_id"].detach().cpu().int().tolist()
     weights = batch["weight"].detach().cpu().tolist()
+    max_legal_moves = self._current_fixed_ref_max_legal_moves(loss_type)
 
     for sfen, actual_move, ply, context_id, weight in zip(sfens, actual_moves, plies, context_ids, weights):
       actual_after = self._make_after_sfen(sfen, int(actual_move))
       if actual_after is None:
         continue
 
-      candidates = self._iter_candidate_after_fens(sfen, int(actual_move))
+      candidates = self._iter_candidate_after_fens(sfen, int(actual_move), max_legal_moves)
       if not candidates:
         continue
 
@@ -630,7 +641,7 @@ class NNUE(pl.LightningModule):
   def _step_fixed_ref(self, batch: dict[str, Any], loss_type: str) -> Tensor:
     param = next(self.parameters())
     device = param.device
-    actual_fens, ref_fens, pair_plies, pair_context_ids, weights, total_candidates = self._build_fixed_ref_pairs(batch, device)
+    actual_fens, ref_fens, pair_plies, pair_context_ids, weights, total_candidates = self._build_fixed_ref_pairs(batch, device, loss_type)
     if not actual_fens:
       loss = self._zero_loss_with_grad()
       self.log(loss_type, loss)

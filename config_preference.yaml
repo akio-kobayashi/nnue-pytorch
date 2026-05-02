@@ -10,7 +10,8 @@ model:
   preference_weight: 1.0
   preference_beta: 1.0           # Scaling for Bradley-Terry logits
   preference_num_contexts: 5
-  fixed_ref_max_legal_moves: 20
+  fixed_ref_max_legal_moves: 5
+  fixed_ref_val_max_legal_moves: 2
   fixed_ref_candidate_chunk_size: 8
   
   # Conditional LoRA at the input layer (Feature Transformer)
@@ -40,6 +41,7 @@ data:
   preference_data: true
   preference_context_type: "bucket"
   py_data_train_num_workers: 16
+  py_data_val_batch_size: 8
   
   # Elo Bucket definition: boundaries for context_id assignment
   # Buckets: <1200, 1200-1600, 1600-2000, 2000-2400, >2400
@@ -53,6 +55,7 @@ data:
 
 trainer:
   num_sanity_val_steps: 0
+  limit_val_batches: 64
   max_epochs: 10
   accelerator: "auto"
   devices: 1

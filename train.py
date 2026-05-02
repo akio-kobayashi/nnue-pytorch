@@ -7,8 +7,9 @@ import os
 import pytorch_lightning as pl
 import features as features_module
 import torch
+import yaml
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 from torch import set_num_threads as t_set_num_threads
 from pytorch_lightning.cli import LightningCLI
 from torch.utils.data import DataLoader
@@ -18,6 +19,79 @@ DEFAULT_EPOCH_SIZE = 10_000_000
 DEFAULT_VALIDATION_SIZE = 1_000_000
 DEFAULT_PY_DATA_TRAIN_NUM_WORKERS = 4
 DEFAULT_PY_DATA_VAL_BATCH_SIZE = 32
+
+
+def _to_serializable(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(k): _to_serializable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_serializable(v) for v in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if hasattr(value, "as_dict") and callable(value.as_dict):
+        return _to_serializable(value.as_dict())
+    if hasattr(value, "__dict__"):
+        return _to_serializable(vars(value))
+    return str(value)
+
+
+def _flatten_for_logger(value: Any, prefix: str = "") -> dict[str, Any]:
+    if isinstance(value, dict):
+        flat: dict[str, Any] = {}
+        for key, child in value.items():
+            child_prefix = f"{prefix}.{key}" if prefix else str(key)
+            flat.update(_flatten_for_logger(child, child_prefix))
+        return flat
+    if isinstance(value, list):
+        return {prefix: ",".join(str(_to_serializable(v)) for v in value)}
+    return {prefix: value}
+
+
+class HParamsSnapshotCallback(pl.Callback):
+    def __init__(self, cli_config: Any) -> None:
+        super().__init__()
+        self.cli_config = _to_serializable(cli_config)
+        self._written = False
+
+    def _log_dir(self, trainer: pl.Trainer) -> Path:
+        logger = trainer.logger
+        if logger is not None and getattr(logger, "log_dir", None):
+            return Path(logger.log_dir)
+        return Path(trainer.default_root_dir)
+
+    def _trainer_summary(self, trainer: pl.Trainer) -> dict[str, Any]:
+        return {
+            "accelerator": trainer.accelerator.__class__.__name__.replace("Accelerator", "").lower(),
+            "devices": trainer.num_devices,
+            "max_epochs": trainer.max_epochs,
+            "precision": str(trainer.precision),
+            "default_root_dir": trainer.default_root_dir,
+            "accumulate_grad_batches": trainer.accumulate_grad_batches,
+        }
+
+    def _merged_config(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> dict[str, Any]:
+        config = self.cli_config if isinstance(self.cli_config, dict) else {"config": self.cli_config}
+        merged = dict(config)
+        merged["model_hparams"] = _to_serializable(dict(pl_module.hparams))
+        datamodule = trainer.datamodule
+        if datamodule is not None and hasattr(datamodule, "hparams"):
+            merged["data_hparams"] = _to_serializable(dict(datamodule.hparams))
+        merged["trainer_runtime"] = self._trainer_summary(trainer)
+        return merged
+
+    def setup(self, trainer: pl.Trainer, pl_module: pl.LightningModule, stage: str) -> None:
+        if self._written or not trainer.is_global_zero or stage != "fit":
+            return
+        config = self._merged_config(trainer, pl_module)
+        log_dir = self._log_dir(trainer)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        with (log_dir / "hparams.yaml").open("w", encoding="utf-8") as f:
+            yaml.safe_dump(config, f, sort_keys=False, allow_unicode=False)
+        if trainer.logger is not None:
+            trainer.logger.log_hyperparams(_flatten_for_logger(config))
+        self._written = True
 
 
 def _default_batch_size() -> int:
@@ -281,16 +355,19 @@ def main():
     # with dot notation, e.g., --model.lambda_ 0.5 or --data.batch_size 8192
     cli_kwargs = {"save_config_callback": None}
     try:
-        MyCLI(
+        cli = MyCLI(
             M.NNUE,
             NNUEDataModule,
+            run=False,
             parser_kwargs={"fit": {"default_config_files": ["config.yaml"]}},
             **cli_kwargs,
         )
     except TypeError as exc:
         if "default_config_files" not in str(exc):
             raise
-        MyCLI(M.NNUE, NNUEDataModule, **cli_kwargs)
+        cli = MyCLI(M.NNUE, NNUEDataModule, run=False, **cli_kwargs)
+    cli.trainer.callbacks.append(HParamsSnapshotCallback(cli.config))
+    cli.trainer.fit(cli.model, datamodule=cli.datamodule)
 
 if __name__ == "__main__":
     main()
