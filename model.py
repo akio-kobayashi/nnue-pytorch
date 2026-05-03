@@ -293,12 +293,22 @@ class NNUE(pl.LightningModule):
     return (rank_features @ self.input_lora_b.weight.T) * scale
 
   def _sparse_linear(self, x: Tensor, weight: Tensor) -> Tensor:
-    # ROCm/HIP sparse COO matmul is unstable in this workload and has been
-    # triggering illegal memory accesses. Fall back to dense input on HIP.
-    if x.is_sparse and x.device.type == "cuda" and torch.version.hip is not None:
-      return x.to_dense() @ weight
     if x.is_sparse:
-      return torch.sparse.mm(x, weight)
+      x = x.coalesce()
+      batch_size = x.shape[0]
+      out_features = weight.shape[1]
+      out = weight.new_zeros((batch_size, out_features))
+      indices = x.indices()
+      batch_indices = indices[0].to(dtype=torch.long)
+      feature_indices = indices[1].to(dtype=torch.long)
+      values = x.values().to(dtype=weight.dtype)
+      contrib = weight.index_select(0, feature_indices)
+      if values.ndim == 1:
+        contrib = contrib * values.unsqueeze(1)
+      else:
+        contrib = contrib * values
+      out.index_add_(0, batch_indices, contrib)
+      return out
     return x @ weight
 
   def _forward_hidden(
