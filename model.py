@@ -551,13 +551,14 @@ class NNUE(pl.LightningModule):
 
     best_score: Tensor | None = None
     best_index = 0
+    ref_device = torch.device("cpu")
 
     for start in range(0, len(candidate_fens), chunk_size):
       end = min(start + chunk_size, len(candidate_fens))
       us, them, white, black = self._make_sparse_tensors_from_fens(
           candidate_fens[start:end],
           candidate_plies[start:end],
-          device,
+          ref_device,
       )
       with torch.no_grad():
         # After one move, side-to-move is the opponent, so negate to recover
