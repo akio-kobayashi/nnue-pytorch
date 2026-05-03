@@ -215,7 +215,8 @@ class TrainingDataProvider:
 
 
 def make_sparse_batch_from_fens(feature_set, fens, scores, plies, results):
-    if feature_set.name in ["HalfKP", "HalfKP^"]:
+    use_python_halfkp_builder = os.environ.get("NNUE_PYTHON_HALF_KP_BUILDER", "").lower() in {"1", "true", "yes"}
+    if use_python_halfkp_builder and feature_set.name in ["HalfKP", "HalfKP^"]:
         size = len(fens)
         num_inputs = feature_set.num_features
         
@@ -261,7 +262,9 @@ def make_sparse_batch_from_fens(feature_set, fens, scores, plies, results):
         
         return PythonSparseBatch(us, them, white, black, outcome, score, ply)
 
-    # Fallback to DLL for other feature sets
+    # Default to the DLL builder. It avoids repeated Python-side list/tensor
+    # construction in the fixed-ref route, which can otherwise cause the main
+    # process RSS to grow steadily even when objects are freed.
     results_ = (ctypes.c_int*len(scores))()
     scores_ = (ctypes.c_int*len(plies))()
     plies_ = (ctypes.c_int*len(results))()
