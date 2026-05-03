@@ -490,9 +490,14 @@ class NNUE(pl.LightningModule):
     l2_bias = s["l2.bias"].to(device=us.device, dtype=us.dtype)
     output_weight = s["output.weight"].to(device=us.device, dtype=us.dtype)
     output_bias = s["output.bias"].to(device=us.device, dtype=us.dtype)
-    
-    w_base = F.linear(white, input_weight, input_bias)
-    b_base = F.linear(black, input_weight, input_bias)
+
+    # Mirror the main forward path. Applying F.linear directly to sparse COO
+    # tensors is fragile on HIP/ROCm and has been triggering illegal accesses.
+    w_base = torch.sparse.mm(white, input_weight.T)
+    b_base = torch.sparse.mm(black, input_weight.T)
+    if input_bias is not None:
+      w_base = w_base + input_bias
+      b_base = b_base + input_bias
     w = w_base + b_base
     b = b_base + w_base
     l0_ = (us * torch.cat([w, b], dim=1)) + (them * torch.cat([b, w], dim=1))
