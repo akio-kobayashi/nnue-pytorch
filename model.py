@@ -10,6 +10,7 @@ from torch.optim import Optimizer
 import cshogi
 import features as features_module
 import nnue_dataset
+from move16_utils import decode_move16_to_cshogi_move
 
 Batch = tuple[Tensor, ...]
 TensorDict = dict[str, Tensor]
@@ -551,10 +552,11 @@ class NNUE(pl.LightningModule):
 
   def _iter_candidate_after_fens(self, sfen: str, actual_move: int, max_legal_moves: int) -> list[tuple[int, str]]:
     board = cshogi.Board(sfen)
+    actual_move_int = decode_move16_to_cshogi_move(board, int(actual_move))
     candidates: list[tuple[int, str]] = []
     for move in board.legal_moves:
       move_int = int(move)
-      if move_int == int(actual_move):
+      if move_int == actual_move_int:
         continue
       board.push(move_int)
       candidates.append((move_int, board.sfen()))
@@ -565,7 +567,7 @@ class NNUE(pl.LightningModule):
 
   def _make_after_sfen(self, sfen: str, move: int) -> str | None:
     board = cshogi.Board(sfen)
-    move_int = int(move)
+    move_int = decode_move16_to_cshogi_move(board, int(move))
     if not board.is_legal(move_int):
       return None
     board.push(move_int)

@@ -13,6 +13,7 @@ import cshogi
 import torch
 
 import features as features_module
+from move16_utils import decode_move16_to_cshogi_move
 import nnue_dataset
 import preference_dataset
 
@@ -26,9 +27,10 @@ def _load_dataset(path: str, context_type: str):
 
 def _build_after_sfen(sfen: str, move: int) -> str:
     board = cshogi.Board(sfen)
-    if not board.is_legal(int(move)):
-        raise ValueError(f"illegal move {move} for sfen: {sfen}")
-    board.push(int(move))
+    move_int = decode_move16_to_cshogi_move(board, int(move))
+    if not board.is_legal(move_int):
+        raise ValueError(f"illegal decoded move {move_int} from Move16={move} for sfen: {sfen}")
+    board.push(move_int)
     return board.sfen()
 
 
