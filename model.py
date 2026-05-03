@@ -70,7 +70,6 @@ class NNUE(pl.LightningModule):
     self.momentum = momentum
     self.ply_begin_threshold = ply_begin_threshold
     self.ply_end_threshold = ply_end_threshold
-    self.validation_step_outputs = []
     self.ema_enabled = ema_enabled
     self.ema_decay = ema_decay
     self.ema_update_every = max(1, int(ema_update_every))
@@ -450,8 +449,10 @@ class NNUE(pl.LightningModule):
   def _ensure_fixed_ref_state(self) -> None:
     if self._fixed_ref_state:
       return
+    # Keep the fixed reference snapshot on CPU so the first preference step
+    # does not permanently duplicate the whole model on the training device.
     self._fixed_ref_state = {
-        key: value.detach().clone()
+        key: value.detach().to(device="cpu").clone()
         for key, value in self.state_dict().items()
         if torch.is_floating_point(value)
     }
@@ -745,9 +746,7 @@ class NNUE(pl.LightningModule):
     return self.step_(batch, batch_idx, 'train_loss')
 
   def validation_step(self, batch: Batch, batch_idx: int) -> Tensor:
-    loss = self.step_(batch, batch_idx, 'val_loss')
-    self.validation_step_outputs.append(loss.detach())
-    return loss
+    return self.step_(batch, batch_idx, 'val_loss')
 
   def on_fit_start(self) -> None:
     if self.ema_enabled:
@@ -778,11 +777,7 @@ class NNUE(pl.LightningModule):
     self._log_cuda_memory_stats("val")
   
   def on_validation_epoch_end(self) -> None:
-    try:
-      if self.validation_step_outputs:
-        del self.validation_step_outputs[:]
-    finally:
-      self.restore_original_weights()
+    self.restore_original_weights()
 
   def test_step(self, batch: Batch, batch_idx: int) -> None:
     self.step_(batch, batch_idx, 'test_loss')
