@@ -27,6 +27,14 @@ def _setup_dll_signatures(dll):
     dll.fetch_next_sparse_batch.argtypes = [ctypes.c_void_p]
     dll.destroy_sparse_batch.argtypes = [SparseBatchPtr]
     dll.get_sparse_batch_from_fens.restype = SparseBatchPtr
+    dll.get_sparse_batch_from_fens.argtypes = [
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.POINTER(ctypes.c_char_p),
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_int),
+    ]
 
 def create_sparse_batch_stream(*args, **kwargs):
     return get_dll().create_sparse_batch_stream(*args, **kwargs)
