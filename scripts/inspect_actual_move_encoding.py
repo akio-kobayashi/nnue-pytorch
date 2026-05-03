@@ -12,7 +12,6 @@ if str(REPO_ROOT) not in sys.path:
 import cshogi
 
 import preference_dataset
-from move16_utils import decode_move16_to_cshogi_move
 
 
 def _load_dataset(path: str, context_type: str):
@@ -65,27 +64,13 @@ def main() -> None:
         except Exception as exc:
             direct_usi = f"<direct error: {exc}>"
 
-        move16_ok = False
-        move16_usi = ""
-        move16_error = ""
-        try:
-            decoded = decode_move16_to_cshogi_move(board, raw_move)
-            move16_ok = True
-            move16_usi = _move_to_usi(board, decoded)
-        except Exception as exc:
-            move16_error = str(exc)
-
         print(f"[{idx}]")
         print(f"sfen: {sample.sfen}")
         print(f"raw actual_move: {raw_move}")
+        print(f"truncated u16: {raw_move & 0xFFFF}")
         print(f"direct legal: {direct_legal}")
         if direct_usi:
             print(f"direct usi: {direct_usi}")
-        print(f"move16 decodable: {move16_ok}")
-        if move16_ok:
-            print(f"move16 usi: {move16_usi}")
-        else:
-            print(f"move16 error: {move16_error}")
         print(f"legal preview: {_legal_moves_preview(board, args.legal_preview)}")
         print("")
 

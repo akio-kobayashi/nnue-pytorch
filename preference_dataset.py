@@ -15,7 +15,7 @@ from torch.utils.data import Dataset
 DEFAULT_ELO_BUCKETS = (1200, 1600, 2000, 2400)
 META_DTYPE = np.dtype([
   ("game_result", np.uint8),
-  ("actual_move", "<u2"),
+  ("actual_move", "<u4"),
   ("ply", "<u2"),
   ("context_id", "<u2"),
   ("sample_weight_q12", "<u2"),

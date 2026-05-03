@@ -4,15 +4,15 @@ packed sfen values with per-position metadata for the C++ loader.
 
 The binary file layout consists of two contiguous sections:
   Section 1 (PSV): N x 40 bytes  - PackedSfenValue records
-  Section 2 (META): N x 9 bytes  - per-position metadata
+  Section 2 (META): N x 11 bytes - per-position metadata
 
-META record layout (9 bytes, little-endian):
+META record layout (11 bytes, little-endian):
   Offset  Size  Field              Description
   0       1     game_result        1=win, 0=draw, 255=loss
-  1       2     actual_move        u16
-  3       2     ply                u16
-  5       2     context_id         Elo bucket or player ID (u16)
-  7       2     sample_weight_q12  weight x 1000, quantized (u16)
+  1       4     actual_move        u32
+  5       2     ply                u16
+  7       2     context_id         Elo bucket or player ID (u16)
+  9       2     sample_weight_q12  weight x 1000, quantized (u16)
 
 Usage:
   python export_preference_data.py <input.h5> [output_dir]
@@ -40,11 +40,11 @@ import numpy as np
 
 # Constants
 PACKED_SFN_SIZE = 40
-META_SIZE = 9  # 1 (u8) + 4*2 (u16)
+META_SIZE = 11  # 1 (u8) + 1*u32 + 3*u16
 
 META_DTYPE = np.dtype([
     ("game_result", np.uint8),
-    ("actual_move", "<u2"),
+    ("actual_move", "<u4"),
     ("ply", "<u2"),
     ("context_id", "<u2"),
     ("sample_weight_q12", "<u2"),
@@ -186,7 +186,7 @@ def export(
             white_player = game_meta_records[gi]["white_player"]
 
             psv_chunk = positions["psv"]
-            actual_moves = positions["actual_move"].astype(np.uint16, copy=False)
+            actual_moves = positions["actual_move"].astype(np.uint32, copy=False)
             plys_raw = positions["ply"]
 
             psv_data[idx:idx + n] = psv_chunk

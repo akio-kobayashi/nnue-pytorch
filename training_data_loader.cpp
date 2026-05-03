@@ -535,7 +535,7 @@ namespace {
     struct PreferenceBinaryStream : training_data::BasicSfenInputStream
     {
         static constexpr std::size_t PACKED_SFN_SIZE = 40;
-        static constexpr std::size_t META_SIZE = 9; // 1+2+2+2+2
+        static constexpr std::size_t META_SIZE = 11; // 1+4+2+2+2
 
         PreferenceBinaryStream(std::string psv_path, std::string meta_path, bool cyclic)
             : m_psv_stream(psv_path, std::ios::in | std::ios::binary),
@@ -596,7 +596,7 @@ namespace {
             }
 
             auto entry = packedSfenValueToTrainingDataEntry(psv);
-            // Parse meta: game_result(u8) + actual_move(u16) + ply(u16) + context_id(u16) + sample_weight_q12(u16)
+            // Parse meta: game_result(u8) + actual_move(u32) + ply(u16) + context_id(u16) + sample_weight_q12(u16)
             std::size_t offset = 0;
             entry.result = static_cast<int>(meta_raw[offset]) - (meta_raw[offset] == 255 ? 2 : (meta_raw[offset] == 0 ? -1 : 0));
             // Fix: game_result 0=-1, 1=0, 2=1 (for loss/draw/win)
@@ -608,9 +608,11 @@ namespace {
             else entry.result = 0;
             offset += 1;
 
-            const auto raw_move = static_cast<uint16_t>(meta_raw[offset]) | (static_cast<uint16_t>(meta_raw[offset + 1]) << 8);
-            entry.move = entry.pos->to_move(Move16(raw_move));
-            offset += 2;
+            // Preference binaries now store the source pipeline's uint32 move
+            // encoding. The base TrainingDataEntry path here does not consume
+            // entry.move, so keep it inert instead of mis-decoding it as Move16.
+            offset += 4;
+            entry.move = MOVE_NONE;
             entry.ply = static_cast<uint16_t>(meta_raw[offset]) | (static_cast<uint16_t>(meta_raw[offset + 1]) << 8);
             offset += 2;
             // context_id and sample_weight_q12 are stored but not used by base TrainingDataEntry
