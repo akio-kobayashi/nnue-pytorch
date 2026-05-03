@@ -289,8 +289,17 @@ class NNUE(pl.LightningModule):
       return x.new_zeros((x.shape[0], self.input.out_features))
 
     scale = self.input_adapter_alpha / float(self.input_adapter_rank)
-    rank_features = torch.sparse.mm(x, self.input_lora_a.weight)       # [batch, rank]
+    rank_features = self._sparse_linear(x, self.input_lora_a.weight)
     return (rank_features @ self.input_lora_b.weight.T) * scale
+
+  def _sparse_linear(self, x: Tensor, weight: Tensor) -> Tensor:
+    # ROCm/HIP sparse COO matmul is unstable in this workload and has been
+    # triggering illegal memory accesses. Fall back to dense input on HIP.
+    if x.is_sparse and x.device.type == "cuda" and torch.version.hip is not None:
+      return x.to_dense() @ weight
+    if x.is_sparse:
+      return torch.sparse.mm(x, weight)
+    return x @ weight
 
   def _forward_hidden(
       self,
@@ -301,8 +310,8 @@ class NNUE(pl.LightningModule):
   ) -> Tensor:
     iw = self.input.weight
     ib = self.input.bias
-    w_out = torch.sparse.mm(w_in, iw.T)
-    b_out = torch.sparse.mm(b_in, iw.T)
+    w_out = self._sparse_linear(w_in, iw.T)
+    b_out = self._sparse_linear(b_in, iw.T)
     if ib is not None:
       w_out = w_out + ib
       b_out = b_out + ib
@@ -509,8 +518,8 @@ class NNUE(pl.LightningModule):
 
     # Mirror the main forward path. Applying F.linear directly to sparse COO
     # tensors is fragile on HIP/ROCm and has been triggering illegal accesses.
-    w_base = torch.sparse.mm(white, input_weight.T)
-    b_base = torch.sparse.mm(black, input_weight.T)
+    w_base = self._sparse_linear(white, input_weight.T)
+    b_base = self._sparse_linear(black, input_weight.T)
     if input_bias is not None:
       w_base = w_base + input_bias
       b_base = b_base + input_bias
