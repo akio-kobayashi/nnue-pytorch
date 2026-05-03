@@ -468,10 +468,18 @@ class NNUE(pl.LightningModule):
       fens: list[str],
       plies: list[int],
       device: torch.device,
+      prefer_python_builder: bool = False,
   ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
     scores = [0 for _ in fens]
     results = [0 for _ in fens]
-    batch = nnue_dataset.make_sparse_batch_from_fens(self.feature_set, fens, scores, plies, results)
+    batch = nnue_dataset.make_sparse_batch_from_fens(
+        self.feature_set,
+        fens,
+        scores,
+        plies,
+        results,
+        prefer_python_builder=prefer_python_builder,
+    )
     try:
       tensors = batch.contents.get_tensors(device)
       us, them, white, black, _outcome, _score, _ply = tensors[:7]
@@ -567,6 +575,7 @@ class NNUE(pl.LightningModule):
           candidate_fens[start:end],
           candidate_plies[start:end],
           ref_device,
+          prefer_python_builder=True,
       )
       with torch.no_grad():
         # After one move, side-to-move is the opponent, so negate to recover

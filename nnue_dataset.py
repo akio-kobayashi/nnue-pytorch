@@ -222,8 +222,10 @@ class TrainingDataProvider:
         self._cleanup_stream()
 
 
-def make_sparse_batch_from_fens(feature_set, fens, scores, plies, results):
-    use_python_halfkp_builder = os.environ.get("NNUE_PYTHON_HALF_KP_BUILDER", "").lower() in {"1", "true", "yes"}
+def make_sparse_batch_from_fens(feature_set, fens, scores, plies, results, prefer_python_builder=False):
+    use_python_halfkp_builder = prefer_python_builder or (
+        os.environ.get("NNUE_PYTHON_HALF_KP_BUILDER", "").lower() in {"1", "true", "yes"}
+    )
     if use_python_halfkp_builder and feature_set.name in ["HalfKP", "HalfKP^"]:
         size = len(fens)
         num_inputs = feature_set.num_features
