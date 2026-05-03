@@ -475,6 +475,14 @@ class NNUE(pl.LightningModule):
     try:
       tensors = batch.contents.get_tensors(device)
       us, them, white, black, _outcome, _score, _ply = tensors[:7]
+      if device.type == "cpu":
+        # On CPU, ctypes/numpy -> torch can alias the C++ batch buffers.
+        # The batch is destroyed right after this block, so deep-copy the
+        # tensors before returning to avoid use-after-free corruption.
+        us = us.clone()
+        them = them.clone()
+        white = white.clone()
+        black = black.clone()
     finally:
       nnue_dataset.destroy_sparse_batch(batch)
     return us, them, white, black
