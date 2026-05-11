@@ -594,7 +594,6 @@ class NNUE(pl.LightningModule):
           candidate_fens[start:end],
           candidate_plies[start:end],
           ref_device,
-          prefer_python_builder=True,
       )
       with torch.no_grad():
         # After one move, side-to-move is the opponent, so negate to recover

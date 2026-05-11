@@ -74,7 +74,7 @@ def main() -> None:
     parser.add_argument(
         "--builder",
         choices=("python", "dll"),
-        default="python",
+        default="dll",
         help="Sparse batch builder to use",
     )
     parser.add_argument("--device", default="cpu", help="Target torch device, e.g. cpu or cuda:0")
