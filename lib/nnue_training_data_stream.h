@@ -8,6 +8,8 @@
 #include <fstream>
 #include <string>
 #include <memory>
+#include <stdexcept>
+#include <vector>
 
 #ifdef _WIN32
 #include <ppl.h>
@@ -39,6 +41,36 @@ namespace training_data {
         {
             return filename + "." + ext;
         }
+    }
+
+    static std::string trim(const std::string& s)
+    {
+        const auto begin = s.find_first_not_of(" \t\r\n");
+        if (begin == std::string::npos) return "";
+        const auto end = s.find_last_not_of(" \t\r\n");
+        return s.substr(begin, end - begin + 1);
+    }
+
+    static std::string dirname(const std::string& path)
+    {
+        const auto pos = path.find_last_of("/\\");
+        if (pos == std::string::npos) return "";
+        return path.substr(0, pos);
+    }
+
+    static bool is_absolute_path(const std::string& path)
+    {
+        if (path.empty()) return false;
+        if (path[0] == '/' || path[0] == '\\') return true;
+        return path.size() > 1 && path[1] == ':';
+    }
+
+    static std::string join_path(const std::string& base, const std::string& child)
+    {
+        if (base.empty() || is_absolute_path(child)) return child;
+        const char last = base.back();
+        if (last == '/' || last == '\\') return base + child;
+        return base + "/" + child;
     }
 
     struct BasicSfenInputStream
@@ -166,10 +198,115 @@ namespace training_data {
         std::function<bool(const TrainingDataEntry&)> m_skipPredicate;
     };
 
+    inline std::vector<std::string> load_manifest_filenames(const std::string& manifestPath)
+    {
+        std::ifstream manifest(manifestPath);
+        if (!manifest)
+            throw std::runtime_error("Failed to open manifest: " + manifestPath);
+
+        std::vector<std::string> filenames;
+        const auto baseDir = dirname(manifestPath);
+        std::string line;
+        while (std::getline(manifest, line))
+        {
+            const auto commentPos = line.find('#');
+            if (commentPos != std::string::npos)
+                line = line.substr(0, commentPos);
+            line = trim(line);
+            if (line.empty())
+                continue;
+            filenames.push_back(join_path(baseDir, line));
+        }
+
+        if (filenames.empty())
+            throw std::runtime_error("Manifest is empty: " + manifestPath);
+
+        return filenames;
+    }
+
+    struct ManifestBinSfenInputStream : BasicSfenInputStream
+    {
+        ManifestBinSfenInputStream(
+            std::vector<std::string> filenames,
+            bool cyclic,
+            std::function<bool(const TrainingDataEntry&)> skipPredicate
+        ) :
+            m_filenames(std::move(filenames)),
+            m_cyclic(cyclic),
+            m_skipPredicate(std::move(skipPredicate)),
+            m_eof(m_filenames.empty())
+        {
+            if (!m_eof)
+                open_current_file();
+        }
+
+        std::optional<TrainingDataEntry> next() override
+        {
+            while (!m_eof)
+            {
+                auto v = m_currentStream->next();
+                if (v.has_value())
+                    return v;
+                if (!advance_stream())
+                    return std::nullopt;
+            }
+            return std::nullopt;
+        }
+
+        bool eof() const override
+        {
+            return m_eof;
+        }
+
+    private:
+        void open_current_file()
+        {
+            m_currentStream = std::make_unique<BinSfenInputStream>(
+                m_filenames[m_currentIndex],
+                false,
+                m_skipPredicate
+            );
+            if (m_currentStream->eof())
+                throw std::runtime_error("Failed to open training data file: " + m_filenames[m_currentIndex]);
+        }
+
+        bool advance_stream()
+        {
+            if (m_filenames.empty())
+            {
+                m_eof = true;
+                return false;
+            }
+
+            ++m_currentIndex;
+            if (m_currentIndex >= m_filenames.size())
+            {
+                if (!m_cyclic)
+                {
+                    m_eof = true;
+                    return false;
+                }
+                m_currentIndex = 0;
+            }
+
+            open_current_file();
+            return true;
+        }
+
+        std::vector<std::string> m_filenames;
+        bool m_cyclic;
+        std::function<bool(const TrainingDataEntry&)> m_skipPredicate;
+        std::size_t m_currentIndex = 0;
+        bool m_eof = false;
+        std::unique_ptr<BinSfenInputStream> m_currentStream;
+    };
+
     inline std::unique_ptr<BasicSfenInputStream> open_sfen_input_file(const std::string& filename, bool cyclic, std::function<bool(const TrainingDataEntry&)> skipPredicate = nullptr)
     {
         if (has_extension(filename, BinSfenInputStream::extension))
             return std::make_unique<BinSfenInputStream>(filename, cyclic, std::move(skipPredicate));
+        if (has_extension(filename, "txt"))
+            return std::make_unique<ManifestBinSfenInputStream>(load_manifest_filenames(filename), cyclic, std::move(skipPredicate));
 
         return nullptr;
     }
@@ -179,6 +316,8 @@ namespace training_data {
         // TODO (low priority): optimize and parallelize .bin reading.
         if (has_extension(filename, BinSfenInputStream::extension))
             return std::make_unique<BinSfenInputStream>(filename, cyclic, std::move(skipPredicate));
+        if (has_extension(filename, "txt"))
+            return std::make_unique<ManifestBinSfenInputStream>(load_manifest_filenames(filename), cyclic, std::move(skipPredicate));
 
         return nullptr;
     }
