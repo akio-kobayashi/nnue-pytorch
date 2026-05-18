@@ -155,6 +155,207 @@ struct HalfKPFactorized {
             counter += 1;
         }
     }
+struct HalfKPE9 {
+    static constexpr int NUM_SQ = 81;
+    static constexpr int NUM_PLANES = 1548; // == fe_end
+    static constexpr int EFFECT_STATES = 3 * 3;
+    static constexpr int INPUTS = NUM_PLANES * NUM_SQ * EFFECT_STATES;
+
+    static constexpr int MAX_ACTIVE_FEATURES = 38;
+
+    static Square get_square_from_bonapiece(Eval::BonaPiece p)
+    {
+        if (p < Eval::fe_hand_end) {
+            return SQ_NB;
+        }
+        return static_cast<Square>((p - Eval::fe_hand_end) % SQ_NB);
+    }
+
+    static int get_effect_count(const Position& pos, Square sq_p, Color perspective_org, Color perspective)
+    {
+        if (sq_p == SQ_NB) {
+            return 0;
+        }
+        if (perspective_org == Color::WHITE) {
+            sq_p = Inv(sq_p);
+        }
+        return std::min(int(pos.board_effect[perspective].effect(sq_p)), 2);
+    }
+
+    static int make_index(Square sq_target_k, Eval::BonaPiece p, int effect1, int effect2)
+    {
+        return static_cast<int>(Eval::fe_end) * static_cast<int>(sq_target_k)
+            + static_cast<int>(p)
+            + static_cast<int>(Eval::fe_end) * static_cast<int>(SQ_NB) * (effect1 * 3 + effect2);
+    }
+
+    static int fill_features_sparse(int i, const TrainingDataEntry& e, int* features, float* values, int& counter, Color color)
+    {
+        auto& pos = *e.pos;
+        Eval::BonaPiece* pieces = nullptr;
+        if (color == Color::BLACK) {
+            pieces = pos.eval_list()->piece_list_fb();
+        }
+        else {
+            pieces = pos.eval_list()->piece_list_fw();
+        }
+        PieceNumber target = static_cast<PieceNumber>(PIECE_NUMBER_KING + color);
+        auto sq_target_k = static_cast<Square>((pieces[target] - Eval::BonaPiece::f_king) % SQ_NB);
+
+        int features_unordered[38];
+        for (PieceNumber pn = PIECE_NUMBER_ZERO; pn < PIECE_NUMBER_KING; ++pn) {
+            auto p = pieces[pn];
+            auto sq_p = get_square_from_bonapiece(p);
+            auto effect1 = get_effect_count(pos, sq_p, color, color);
+            auto effect2 = get_effect_count(pos, sq_p, color, ~color);
+            features_unordered[pn] = make_index(sq_target_k, p, effect1, effect2);
+        }
+        std::sort(features_unordered, features_unordered + PIECE_NUMBER_KING);
+        for (int k = 0; k < PIECE_NUMBER_KING; ++k)
+        {
+            int idx = counter * 2;
+            features[idx] = i;
+            features[idx + 1] = features_unordered[k];
+            values[counter] = 1.0f;
+            counter += 1;
+        }
+        return INPUTS;
+    }
+};
+
+struct HalfKPE9Factorized {
+    static constexpr int HALFKP_INPUTS = HalfKP::INPUTS;
+    static constexpr int K_INPUTS = HalfKP::NUM_SQ;
+    static constexpr int PE9_INPUTS = HalfKPE9::NUM_PLANES * HalfKPE9::EFFECT_STATES;
+    static constexpr int PIECE_INPUTS = HalfKPE9::NUM_PLANES;
+    static constexpr int HALF_RELATIVE_KP_INPUTS = ((HalfKPE9::NUM_PLANES - Eval::fe_hand_end) / HalfKPE9::NUM_SQ) * 17 * 17;
+    static constexpr int INPUTS = HalfKPE9::INPUTS + HALFKP_INPUTS + K_INPUTS + PE9_INPUTS + PIECE_INPUTS + HALF_RELATIVE_KP_INPUTS;
+
+    static constexpr int MAX_K_FEATURES = 1;
+    static constexpr int MAX_HALFKP_FEATURES = 38;
+    static constexpr int MAX_PE9_FEATURES = 38;
+    static constexpr int MAX_PIECE_FEATURES = 38;
+    static constexpr int MAX_HALF_RELATIVE_KP_FEATURES = 38;
+    static constexpr int MAX_ACTIVE_FEATURES =
+        HalfKPE9::MAX_ACTIVE_FEATURES
+        + MAX_HALFKP_FEATURES
+        + MAX_K_FEATURES
+        + MAX_PE9_FEATURES
+        + MAX_PIECE_FEATURES
+        + MAX_HALF_RELATIVE_KP_FEATURES;
+
+    static int make_half_relative_kp_index(Square sq_target_k, Eval::BonaPiece p)
+    {
+        const int piece_index = (static_cast<int>(p) - static_cast<int>(Eval::fe_hand_end)) / HalfKPE9::NUM_SQ;
+        const auto sq_p = static_cast<Square>((p - Eval::fe_hand_end) % SQ_NB);
+        const int relative_file = static_cast<int>(file_of(sq_p)) - static_cast<int>(file_of(sq_target_k)) + 8;
+        const int relative_rank = static_cast<int>(rank_of(sq_p)) - static_cast<int>(rank_of(sq_target_k)) + 8;
+        return piece_index * 17 * 17 + relative_file * 17 + relative_rank;
+    }
+
+    static void fill_features_sparse(int i, const TrainingDataEntry& e, int* features, float* values, int& counter, Color color)
+    {
+        auto counter_before = counter;
+        int offset = HalfKPE9::fill_features_sparse(i, e, features, values, counter, color);
+
+        auto& pos = *e.pos;
+        Eval::BonaPiece* pieces = nullptr;
+        if (color == Color::BLACK) {
+            pieces = pos.eval_list()->piece_list_fb();
+        }
+        else {
+            pieces = pos.eval_list()->piece_list_fw();
+        }
+        PieceNumber target = static_cast<PieceNumber>(PIECE_NUMBER_KING + color);
+        auto sq_target_k = static_cast<Square>((pieces[target] - Eval::BonaPiece::f_king) % SQ_NB);
+
+        {
+            int features_unordered[38];
+            for (PieceNumber pn = PIECE_NUMBER_ZERO; pn < PIECE_NUMBER_KING; ++pn) {
+                auto p = pieces[pn];
+                features_unordered[pn] = offset + static_cast<int>(Eval::fe_end) * static_cast<int>(sq_target_k) + p;
+            }
+            std::sort(features_unordered, features_unordered + PIECE_NUMBER_KING);
+            for (int k = 0; k < PIECE_NUMBER_KING; ++k)
+            {
+                int idx = counter * 2;
+                features[idx] = i;
+                features[idx + 1] = features_unordered[k];
+                values[counter] = 1.0f;
+                counter += 1;
+            }
+        }
+        offset += HALFKP_INPUTS;
+
+        {
+            auto num_added_features = counter - counter_before;
+            int idx = counter * 2;
+            features[idx] = i;
+            features[idx + 1] = offset + static_cast<int>(sq_target_k);
+            values[counter] = static_cast<float>(num_added_features);
+            counter += 1;
+        }
+        offset += K_INPUTS;
+
+        {
+            int features_unordered[38];
+            for (PieceNumber pn = PIECE_NUMBER_ZERO; pn < PIECE_NUMBER_KING; ++pn) {
+                auto p = pieces[pn];
+                auto sq_p = HalfKPE9::get_square_from_bonapiece(p);
+                auto effect1 = HalfKPE9::get_effect_count(pos, sq_p, color, color);
+                auto effect2 = HalfKPE9::get_effect_count(pos, sq_p, color, ~color);
+                features_unordered[pn] = offset + static_cast<int>(p) + static_cast<int>(Eval::fe_end) * (effect1 * 3 + effect2);
+            }
+            std::sort(features_unordered, features_unordered + PIECE_NUMBER_KING);
+            for (int k = 0; k < PIECE_NUMBER_KING; ++k)
+            {
+                int idx = counter * 2;
+                features[idx] = i;
+                features[idx + 1] = features_unordered[k];
+                values[counter] = 1.0f;
+                counter += 1;
+            }
+        }
+        offset += PE9_INPUTS;
+
+        {
+            int features_unordered[38];
+            for (PieceNumber pn = PIECE_NUMBER_ZERO; pn < PIECE_NUMBER_KING; ++pn) {
+                auto p = pieces[pn];
+                features_unordered[pn] = offset + p;
+            }
+            std::sort(features_unordered, features_unordered + PIECE_NUMBER_KING);
+            for (int k = 0; k < PIECE_NUMBER_KING; ++k)
+            {
+                int idx = counter * 2;
+                features[idx] = i;
+                features[idx + 1] = features_unordered[k];
+                values[counter] = 1.0f;
+                counter += 1;
+            }
+        }
+        offset += PIECE_INPUTS;
+
+        int num_half_relative_features = 0;
+        int features_unordered[38];
+        for (PieceNumber pn = PIECE_NUMBER_ZERO; pn < PIECE_NUMBER_KING; ++pn) {
+            auto p = pieces[pn];
+            if (p >= Eval::fe_hand_end) {
+                features_unordered[num_half_relative_features++] = offset + make_half_relative_kp_index(sq_target_k, p);
+            }
+        }
+        std::sort(features_unordered, features_unordered + num_half_relative_features);
+        for (int k = 0; k < num_half_relative_features; ++k)
+        {
+            int idx = counter * 2;
+            features[idx] = i;
+            features[idx + 1] = features_unordered[k];
+            values[counter] = 1.0f;
+            counter += 1;
+        }
+    }
+};
+
 };
 
 // struct HalfKA {
@@ -269,7 +470,6 @@ struct SparseBatch
         white_values = new float[size * FeatureSet<Ts...>::MAX_ACTIVE_FEATURES];
         black_values = new float[size * FeatureSet<Ts...>::MAX_ACTIVE_FEATURES];
         ply = new float[size];
-        npm = new float[size];
 
         num_active_white_features = 0;
         num_active_black_features = 0;
@@ -296,7 +496,6 @@ struct SparseBatch
     float* white_values;
     float* black_values;
     float* ply;
-    float* npm;
 
     ~SparseBatch()
     {
@@ -308,7 +507,6 @@ struct SparseBatch
         delete[] white_values;
         delete[] black_values;
         delete[] ply;
-        delete[] npm;
     }
 
 private:
@@ -320,24 +518,7 @@ private:
         outcome[i] = (e.result + 1.0f) / 2.0f;
         score[i] = e.score;
         ply[i] = e.ply;
-        npm[i] = static_cast<float>(compute_non_pawn_material(*e.pos));
         fill_features(FeatureSet<Ts...>{}, i, e);
-    }
-
-    static int compute_non_pawn_material(const Position& pos)
-    {
-        return
-            (pos.pieces(BLACK, LANCE).pop_count() + pos.pieces(WHITE, LANCE).pop_count()
-                + pos.pieces(BLACK, PRO_LANCE).pop_count() + pos.pieces(WHITE, PRO_LANCE).pop_count()) * 430
-          + (pos.pieces(BLACK, KNIGHT).pop_count() + pos.pieces(WHITE, KNIGHT).pop_count()
-                + pos.pieces(BLACK, PRO_KNIGHT).pop_count() + pos.pieces(WHITE, PRO_KNIGHT).pop_count()) * 581
-          + (pos.pieces(BLACK, SILVER).pop_count() + pos.pieces(WHITE, SILVER).pop_count()
-                + pos.pieces(BLACK, PRO_SILVER).pop_count() + pos.pieces(WHITE, PRO_SILVER).pop_count()) * 716
-          + (pos.pieces(BLACK, GOLD).pop_count() + pos.pieces(WHITE, GOLD).pop_count()) * 782
-          + (pos.pieces(BLACK, BISHOP).pop_count() + pos.pieces(WHITE, BISHOP).pop_count()
-                + pos.pieces(BLACK, HORSE).pop_count() + pos.pieces(WHITE, HORSE).pop_count()) * 1008
-          + (pos.pieces(BLACK, ROOK).pop_count() + pos.pieces(WHITE, ROOK).pop_count()
-                + pos.pieces(BLACK, DRAGON).pop_count() + pos.pieces(WHITE, DRAGON).pop_count()) * 1193;
     }
 
     template <typename... Ts>
@@ -575,6 +756,14 @@ extern "C" {
         {
             return new SparseBatch(FeatureSet<HalfKPFactorized>{}, entries);
         }
+        else if (feature_set == "HalfKPE9")
+        {
+            return new SparseBatch(FeatureSet<HalfKPE9>{}, entries);
+        }
+        else if (feature_set == "HalfKPE9^")
+        {
+            return new SparseBatch(FeatureSet<HalfKPE9Factorized>{}, entries);
+        }
         // else if (feature_set == "HalfKA")
         // {
         //     return new SparseBatch(FeatureSet<HalfKA>{}, entries);
@@ -623,6 +812,14 @@ extern "C" {
         else if (feature_set == "HalfKP^")
         {
             return new FeaturedBatchStream<FeatureSet<HalfKPFactorized>, SparseBatch>(concurrency, filename, batch_size, cyclic, skipPredicate);
+        }
+        else if (feature_set == "HalfKPE9")
+        {
+            return new FeaturedBatchStream<FeatureSet<HalfKPE9>, SparseBatch>(concurrency, filename, batch_size, cyclic, skipPredicate);
+        }
+        else if (feature_set == "HalfKPE9^")
+        {
+            return new FeaturedBatchStream<FeatureSet<HalfKPE9Factorized>, SparseBatch>(concurrency, filename, batch_size, cyclic, skipPredicate);
         }
         // else if (feature_set == "HalfKA")
         // {

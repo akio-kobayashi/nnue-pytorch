@@ -31,6 +31,7 @@ def ascii_hist(name, x, bins=6):
 VERSION = 0x7AF32F16
 YANE_LAYERSTACK_HASH_SEED = 0xB58B6A8D
 YANE_HALFKP_FRIEND_HASH = 0x5D69D5B8
+YANE_HALFKPE9_HASH = 0x5D69D5B9
 
 
 def _infer_features_from_input_dim(input_dim):
@@ -108,12 +109,16 @@ def _yaneuraou_network_hash(model):
 def _yaneuraou_feature_name(feature_set_name):
   if feature_set_name.startswith("HalfKP"):
     return "HalfKP(Friend)"
+  if feature_set_name.startswith("HalfKPE9"):
+    return "HalfKPE9(Friend)"
   return feature_set_name
 
 
 def _yaneuraou_feature_hash(feature_set):
   if feature_set.name.startswith("HalfKP"):
     return YANE_HALFKP_FRIEND_HASH
+  if feature_set.name.startswith("HalfKPE9"):
+    return YANE_HALFKPE9_HASH
   return feature_set.hash
 
 
