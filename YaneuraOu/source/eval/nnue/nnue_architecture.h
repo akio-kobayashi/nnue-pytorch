@@ -27,6 +27,11 @@
 // halfKPE9型
 #include "architectures/halfkpe9_256x2-32-32.h"
 
+#elif defined(EVAL_NNUE_HALFKPE9_768X2_16_64)
+
+// halfKPE9 768x2-16-64型
+#include "architectures/halfkpe9_768x2-16-64.h"
+
 #elif defined(EVAL_NNUE_HALFKP_VM_256X2_32_32)
 
 // halfkp_vm_256x2-32-32型

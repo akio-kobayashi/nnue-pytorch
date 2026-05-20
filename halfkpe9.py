@@ -15,7 +15,7 @@ class Features(FeatureBlock):
   def __init__(self):
     super(Features, self).__init__(
       'HalfKPE9',
-      0x5d69d5b9,
+      0x5d69d5b8,
       OrderedDict([('HalfKPE9', NUM_PLANES * NUM_SQ * EFFECT_STATES)]))
 
   def get_active_features(self, board):

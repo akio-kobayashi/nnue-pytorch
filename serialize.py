@@ -14,6 +14,20 @@ import os
 import matplotlib.pyplot as plt
 import datetime
 
+NNUE_BINARY_EXTENSIONS = (".nnue", ".bin")
+
+def _get_runtime_feature_set(feature_set):
+  runtime_name = feature_set.name[:-1] if feature_set.name.endswith("^") else feature_set.name
+  return features.get_feature_set_from_name(runtime_name)
+
+def _get_engine_feature_name(feature_set):
+  runtime_feature_set = _get_runtime_feature_set(feature_set)
+  if runtime_feature_set.name.startswith("HalfKPE9"):
+    return "HalfKPE9(Friend)"
+  if runtime_feature_set.name.startswith("HalfKP"):
+    return "HalfKP(Friend)"
+  return runtime_feature_set.name
+
 def ascii_hist(name, x, bins=6):
   N,X = numpy.histogram(x, bins=bins)
   total = 1.0*len(x)
@@ -41,9 +55,10 @@ class NNUEWriter():
     self.figure_index = 0
     self.buf = bytearray()
 
+    runtime_feature_set = _get_runtime_feature_set(model.feature_set)
     fc_hash = self.fc_hash(model)
-    self.write_header(model, fc_hash)
-    self.int32(model.feature_set.hash ^ model.l1.in_features) # Feature transformer hash
+    self.write_header(model, fc_hash, runtime_feature_set)
+    self.int32(runtime_feature_set.hash ^ model.l1.in_features) # Feature transformer hash
     self.write_feature_transformer(model)
     self.int32(fc_hash) # FC layers hash
     self.write_fc_layer(model.l1)
@@ -69,21 +84,16 @@ class NNUEWriter():
       prev_hash = layer_hash
     return layer_hash
 
-  def write_header(self, model, fc_hash):
+  def write_header(self, model, fc_hash, runtime_feature_set):
     self.int32(VERSION) # version
-    self.int32(fc_hash ^ model.feature_set.hash ^ model.l1.in_features) # halfkp network hash
+    self.int32(fc_hash ^ runtime_feature_set.hash ^ model.l1.in_features) # halfkp network hash
 
     l1_size = model.l1.in_features // 2
     l2_size = model.l1.out_features
     l3_size = model.l2.out_features
-    num_features = model.feature_set.num_features
+    num_features = runtime_feature_set.num_features
 
-    if model.feature_set.name.startswith("HalfKP"):
-      feature_name = "HalfKP(Friend)"
-    elif model.feature_set.name.startswith("HalfKPE9"):
-      feature_name = "HalfKPE9(Friend)"
-    else:
-      feature_name = model.feature_set.name
+    feature_name = _get_engine_feature_name(model.feature_set)
     description = f"Features={feature_name}[{num_features}->{l1_size}x2],".encode('ascii')
     description += f"Network=AffineTransform[1<-{l3_size}](ClippedReLU[{l3_size}](AffineTransform[{l3_size}<-{l2_size}]".encode('ascii')
     description += f"(ClippedReLU[{l2_size}](AffineTransform[{l2_size}<-{l1_size*2}](InputSlice[{l1_size*2}(0:{l1_size*2})])))))".encode('ascii')
@@ -267,10 +277,85 @@ class NNUEReader():
       raise Exception("Expected: %x, got %x" % (expected, v))
     return v
 
+def _is_nnue_binary_path(path):
+  return path.endswith(NNUE_BINARY_EXTENSIONS)
+
+def _infer_feature_set_name(num_features, requested_features=None):
+  if requested_features is not None:
+    requested_feature_set = features.get_feature_set_from_name(requested_features)
+    if requested_feature_set.num_features == num_features:
+      return requested_features
+
+  matches = []
+  for feature_name in features.get_available_feature_blocks_names():
+    feature_set = features.get_feature_set_from_name(feature_name)
+    if feature_set.num_features == num_features:
+      matches.append(feature_name)
+
+  if len(matches) == 1:
+    return matches[0]
+
+  if len(matches) > 1:
+    raise Exception(
+      f"Multiple feature sets match input.weight width {num_features}: {matches}. "
+      "Specify --features explicitly.")
+
+  raise Exception(
+    f"Could not infer feature set from input.weight width {num_features}. "
+    "Specify --features explicitly.")
+
+def _load_model_from_state_dict(state_dict, requested_features=None):
+  required_keys = [
+    "input.weight",
+    "input.bias",
+    "l1.weight",
+    "l1.bias",
+    "l2.weight",
+    "l2.bias",
+    "output.weight",
+    "output.bias",
+  ]
+  missing_keys = [key for key in required_keys if key not in state_dict]
+  if missing_keys:
+    raise Exception(f"Checkpoint is missing required keys: {missing_keys}")
+
+  feature_name = _infer_feature_set_name(
+    state_dict["input.weight"].shape[1], requested_features=requested_features)
+  l1_size = state_dict["input.weight"].shape[0]
+  l2_size = state_dict["l1.weight"].shape[0]
+  l3_size = state_dict["l2.weight"].shape[0]
+
+  model = M.NNUE(feature_name, l1_size=l1_size, l2_size=l2_size, l3_size=l3_size)
+  model.load_state_dict(state_dict)
+  return model
+
+def load_model(path, requested_features=None):
+  try:
+    obj = torch.load(path, map_location="cpu", weights_only=False)
+  except TypeError:
+    obj = torch.load(path, map_location="cpu")
+
+  if isinstance(obj, M.NNUE):
+    return obj
+
+  if isinstance(obj, dict):
+    if "state_dict" in obj:
+      return _load_model_from_state_dict(
+        obj["state_dict"], requested_features=requested_features)
+
+    if "model" in obj and isinstance(obj["model"], M.NNUE):
+      return obj["model"]
+
+  if hasattr(obj, "state_dict"):
+    return _load_model_from_state_dict(
+      obj.state_dict(), requested_features=requested_features)
+
+  raise Exception(f"Unsupported model format in {path}")
+
 def main():
   parser = argparse.ArgumentParser(description="Converts files between ckpt and nnue format.")
-  parser.add_argument("source", help="Source file (can be .ckpt, .pt or .nnue)")
-  parser.add_argument("target", help="Target file (can be .pt or .nnue)")
+  parser.add_argument("source", help="Source file (can be .ckpt, .pt, .nnue or .bin)")
+  parser.add_argument("target", help="Target file (can be .pt, .nnue or .bin)")
   features.add_argparse_args(parser)
   parser.add_argument("--l1_size", type=int, default=1024)
   parser.add_argument("--l2_size", type=int, default=8)
@@ -282,18 +367,15 @@ def main():
   print('Converting %s to %s' % (args.source, args.target))
 
   if args.source.endswith(".pt") or args.source.endswith(".ckpt"):
-    if not args.target.endswith(".nnue"):
-      raise Exception("Target file must end with .nnue")
-    if args.source.endswith(".pt"):
-      nnue = torch.load(args.source)
-    else:
-      nnue = M.NNUE.load_from_checkpoint(args.source, features=args.features, l1_size=args.l1_size, l2_size=args.l2_size, l3_size=args.l3_size)
+    if not _is_nnue_binary_path(args.target):
+      raise Exception("Target file must end with .nnue or .bin")
+    nnue = load_model(args.source, requested_features=args.features)
     nnue.cpu()
     nnue.eval()
     writer = NNUEWriter(nnue, os.path.dirname(args.target))
     with open(args.target, 'wb') as f:
       f.write(writer.buf)
-  elif args.source.endswith(".nnue"):
+  elif _is_nnue_binary_path(args.source):
     if not args.target.endswith(".pt"):
       raise Exception("Target file must end with .pt")
     with open(args.source, 'rb') as f:

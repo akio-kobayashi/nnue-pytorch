@@ -809,6 +809,10 @@ constexpr bool pretty_jp = false;
 	// hafeKPE9には利きが必要
 	#define LONG_EFFECT_LIBRARY
 	#define USE_BOARD_EFFECT_PREV
+#elif defined(EVAL_NNUE_HALFKPE9_768X2_16_64)
+	#define EVAL_TYPE_NAME "NNUE halfKPE9 768x2-16-64"
+	#define LONG_EFFECT_LIBRARY
+	#define USE_BOARD_EFFECT_PREV
 #elif defined(EVAL_NNUE) // それ以外のNNUEなので標準NNUE halfKP256だと思われる。
 	#define EVAL_TYPE_NAME "NNUE"
 #elif defined(EVAL_DEEP)
