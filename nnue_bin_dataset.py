@@ -1,8 +1,10 @@
+import bisect
 import cshogi
 import halfkp
 import mmap
 import random
 import os
+import pathlib
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -46,6 +48,39 @@ def _compute_npm(board):
     npm += PIECE_VALUES.get(base_type, 0)
   return npm
 
+
+def load_manifest_filenames(manifest_path: str) -> list:
+    """マニフェストファイルから.binファイルのパスを読み込む。
+
+    マニフェストファイルのフォーマット:
+    - 各行に.binファイルのパス（相対パスまたは絶対パス）
+    - '#' 以降はコメントとして無視される
+    - 空行はスキップされる
+    - 相対パスの場合はマニフェストファイルのディレクトリを基準に解決される
+    """
+    manifest = pathlib.Path(manifest_path)
+    base_dir = manifest.parent
+
+    filenames = []
+    with manifest.open("r") as f:
+        for line in f:
+            # コメントを除去
+            comment_pos = line.find("#")
+            if comment_pos != -1:
+                line = line[:comment_pos]
+            line = line.strip()
+            if not line:
+                continue
+            # 相対パスの場合はマニフェストファイルのディレクトリを基準に解決
+            resolved = (base_dir / line).resolve()
+            filenames.append(str(resolved))
+
+    if not filenames:
+        raise ValueError(f"Manifest is empty: {manifest_path}")
+
+    return filenames
+
+
 class ToTensor(object):
   def __init__(self, feature_set):
     self.features = feature_set
@@ -73,21 +108,49 @@ class NNUEBinData(torch.utils.data.Dataset):
   def __init__(self, filename, feature_set):
     super(NNUEBinData, self).__init__()
     self.filename = filename
-    self.len = os.path.getsize(filename) // PACKED_SFEN_VALUE_BYTES
     self.transform = ToTensor(feature_set)
     self.file = None
     self.records = None
+
+    # .txt マニフェストファイルのサポート
+    if filename.lower().endswith(".txt"):
+      self.filenames = load_manifest_filenames(filename)
+      self.len = sum(os.path.getsize(f) // PACKED_SFEN_VALUE_BYTES for f in self.filenames)
+      self.current_file_idx = 0
+      self.offsets = [0]
+      for f in self.filenames:
+          self.offsets.append(self.offsets[-1] + os.path.getsize(f) // PACKED_SFEN_VALUE_BYTES)
+    else:
+      self.len = os.path.getsize(filename) // PACKED_SFEN_VALUE_BYTES
+      self.filenames = None
+      self.offsets = None
 
   def __len__(self):
     return self.len
 
   def get_raw(self, idx):
-    if self.file is None:
-      self.file = open(self.filename, 'rb')
-      self.bytes = mmap.mmap(self.file.fileno(), 0)
-      self.records = np.frombuffer(self.bytes, dtype=PACKED_SFEN_VALUE_DTYPE)
-
-    record = self.records[idx]
+    # .txt マニフェストからファイルとファイル内のインデックスを計算
+    if self.filenames is not None:
+      # idx がどのファイルに属するかをバイナリサーチで特定
+      file_idx = bisect.bisect_right(self.offsets[:-1], idx) - 1
+      if file_idx < 0:
+        file_idx = 0
+      local_idx = idx - self.offsets[file_idx]
+      if file_idx != self.current_file_idx:
+        # ファイルが切り替わったらファイルハンドルを開き直す
+        if self.file is not None:
+          self.file.close()
+        self.file = open(self.filenames[file_idx], 'rb')
+        self.bytes = mmap.mmap(self.file.fileno(), 0)
+        self.records = np.frombuffer(self.bytes, dtype=PACKED_SFEN_VALUE_DTYPE)
+        self.current_file_idx = file_idx
+      record = self.records[local_idx]
+    else:
+      if self.file is None:
+        self.file = open(self.filename, 'rb')
+        self.bytes = mmap.mmap(self.file.fileno(), 0)
+        self.records = np.frombuffer(self.bytes, dtype=PACKED_SFEN_VALUE_DTYPE)
+      record = self.records[idx]
     bd = cshogi.Board()
     bd.set_psfen(np.asarray(record['sfen']))
 
