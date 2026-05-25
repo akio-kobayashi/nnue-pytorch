@@ -60,15 +60,10 @@ class NNUEDataModule(pl.LightningDataModule):
 class MyCLI(LightningCLI):
     def add_arguments_to_parser(self, parser):
         parser.add_argument("--gamma", type=float, default=0.992, help="各エポック後に学習率に乗じる乗法的係数")
-        parser.add_argument("--model.num_buckets", type=int, default=8, help="LayerStackのバケット数")
         parser.link_arguments("gamma", "model.gamma")
 
 
 def main():
-    # LightningCLI will add arguments for the model, datamodule, and trainer.
-    # It will also handle seeding and checkpointing.
-    # All model/data/trainer arguments are now passed through the command line
-    # with dot notation, e.g., --model.lambda_ 0.5 or --data.batch_size 8192
     config_files = []
     config_path = Path("config.yaml")
     if config_path.exists() and config_path.stat().st_size > 0:
