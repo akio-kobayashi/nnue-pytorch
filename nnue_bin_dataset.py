@@ -54,7 +54,7 @@ class ToTensor(object):
     outcome = torch.tensor([outcome])
     score = torch.tensor([score])
     white, black = self.features.get_active_features(bd)
-    return us.float(), them.float(), white.float(), black.float(), outcome.float(), score.float()
+    return us.float(), them.float(), white.float(), black.float(), outcome.float(), score.float(), torch.zeros(us.shape, dtype=torch.long)
 
 class RandomFlip(object):
   def __call__(self, sample):

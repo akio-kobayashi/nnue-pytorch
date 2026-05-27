@@ -60,6 +60,10 @@ class NNUEDataModule(pl.LightningDataModule):
 class MyCLI(LightningCLI):
     def add_arguments_to_parser(self, parser):
         parser.link_arguments("data.features", "model.features")
+        parser.add_argument('--model.factorization_rank', type=int, default=0,
+                            help='CP tensor decomposition rank for the feature transformer (0=disabled)')
+        parser.add_argument('--model.factorization_weight_decay', type=float, default=1e-4,
+                            help='L2 weight decay for CP decomposition factors')
 
 
 def main():

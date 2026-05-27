@@ -470,12 +470,14 @@ struct SparseBatch
         white_values = new float[size * FeatureSet<Ts...>::MAX_ACTIVE_FEATURES];
         black_values = new float[size * FeatureSet<Ts...>::MAX_ACTIVE_FEATURES];
         ply = new float[size];
+        bucket = new int[size];
 
         num_active_white_features = 0;
         num_active_black_features = 0;
 
         std::memset(white, 0, size * FeatureSet<Ts...>::MAX_ACTIVE_FEATURES * 2 * sizeof(int));
         std::memset(black, 0, size * FeatureSet<Ts...>::MAX_ACTIVE_FEATURES * 2 * sizeof(int));
+        std::memset(bucket, 0, size * sizeof(int));
 
         for (int i = 0; i < entries.size(); ++i)
         {
@@ -496,6 +498,7 @@ struct SparseBatch
     float* white_values;
     float* black_values;
     float* ply;
+    int* bucket;
 
     ~SparseBatch()
     {
@@ -507,6 +510,7 @@ struct SparseBatch
         delete[] white_values;
         delete[] black_values;
         delete[] ply;
+        delete[] bucket;
     }
 
 private:
@@ -518,6 +522,7 @@ private:
         outcome[i] = (e.result + 1.0f) / 2.0f;
         score[i] = e.score;
         ply[i] = e.ply;
+        bucket[i] = FeatureSet<Ts...>::get_bucket(e);
         fill_features(FeatureSet<Ts...>{}, i, e);
     }
 
@@ -528,6 +533,21 @@ private:
         FeatureSet<Ts...>::fill_features_sparse(i, e, black, black_values, num_active_black_features, Color::WHITE);
     }
 };
+
+    template <typename... Ts>
+    static int get_bucket(const TrainingDataEntry& e)
+    {
+        // Default bucket: use king square of the side to move as bucket index.
+        // This provides a basic bucketing scheme compatible with LayerStacks=8.
+        auto& pos = *e.pos;
+        Color stm = pos.side_to_move();
+        auto* pieces = (stm == Color::BLACK) ? pos.eval_list()->piece_list_fb()
+                                              : pos.eval_list()->piece_list_fw();
+        PieceNumber king_piece = static_cast<PieceNumber>(PIECE_NUMBER_KING + stm);
+        Square king_sq = static_cast<Square>((pieces[king_piece] - Eval::BonaPiece::f_king) % SQ_NB);
+        // Use a simple bucketing: map 64 squares to 8 buckets via king file
+        return static_cast<int>(king_sq % 8);
+    }
 
 struct AnyStream
 {

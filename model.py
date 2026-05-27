@@ -23,7 +23,9 @@ class NNUE(pl.LightningModule):
       label_smoothing_eps: float = 0.0, num_batches_warmup: int = 10000, newbob_decay: float = 0.5,
       num_epochs_to_adjust_lr: int = 500, score_scaling: float = 361.0, min_newbob_scale: float = 1e-5,
       momentum: float = 0.0, ply_begin_threshold: float = 100.0, ply_end_threshold: float = 120.0,
-      l1_size: int = 1024, l2_size: int = 8, l3_size: int = 96):
+      l1_size: int = 1024, l2_size: int = 8, l3_size: int = 96,
+      layer_stacks: int = 1,
+      factorization_rank: int = 0, factorization_weight_decay: float = 1e-4):
     super().__init__()
     if lambda_ is None:
       lambda_ = [1.0]
@@ -39,9 +41,14 @@ class NNUE(pl.LightningModule):
     feature_set = features_module.get_feature_set_from_name(features)
     self.input = nn.Linear(feature_set.num_features, l1_size)
     self.feature_set = feature_set
-    self.l1 = nn.Linear(2 * l1_size, l2_size)
     self.l2 = nn.Linear(l2_size, l3_size)
     self.output = nn.Linear(l3_size, 1)
+    
+    # Per-stack l1 layers for LayerStacks > 1
+    self.l1_stack = nn.ModuleList([
+        nn.Linear(2 * l1_size, l2_size) for _ in range(layer_stacks)
+    ])
+    self.layer_stacks = layer_stacks
     self.lambda_ = lambda_
     self.lr = lr
     self.label_smoothing_eps = label_smoothing_eps
@@ -58,11 +65,56 @@ class NNUE(pl.LightningModule):
     self.min_newbob_scale = min_newbob_scale
     self.parameter_index = 0
     self.momentum = momentum
+    self.layer_stacks = layer_stacks
     self.ply_begin_threshold = ply_begin_threshold
     self.ply_end_threshold = ply_end_threshold
     self.validation_step_outputs = []
 
     self._zero_virtual_feature_weights()
+
+    # Tensor decomposition state
+    self.factorization_rank = factorization_rank
+    self.factorization_weight_decay = factorization_weight_decay
+    self._init_factorization()
+
+  def _init_factorization(self) -> None:
+    """Initialize CP decomposition parameters for the main feature factor."""
+    if self.factorization_rank <= 0:
+      return
+    feature_set = self.feature_set
+    # Only single feature block supported
+    assert len(feature_set.features) == 1, 'Tensor decomposition requires a single feature block'
+    main_factor_name = feature_set.features[0].get_main_factor_name()
+    num_real_features = feature_set.features[0].num_real_features
+
+    # Determine decomposition dimensions from the main factor
+    l1_size = self.l1_stack[0].in_features // 2
+    main_factor_block = feature_set.features[0]
+    is_halfkpe9 = main_factor_name.startswith('HalfKPE9')
+    if is_halfkpe9:
+      from halfkpe9 import NUM_SQ, NUM_PLANES, EFFECT_STATES
+      shape = (l1_size, NUM_SQ, NUM_PLANES, EFFECT_STATES)
+      num_factors = 4
+    else:
+      from halfkp import NUM_SQ, NUM_PLANES
+      shape = (l1_size, NUM_SQ, NUM_PLANES)
+      num_factors = 3
+
+    # Scale rank by number of factors to keep total parameter count roughly proportional
+    scaled_rank = self.factorization_rank
+
+    # Create CP decomposition parameters with Xavier initialization
+    self.register_parameter('tf_A', nn.Parameter(torch.empty(shape[0], scaled_rank)))
+    fan_in_A, fan_out_A = shape[0], scaled_rank
+    self.tf_A.data.uniform_(-1 / (1.0 + min(fan_in_A, fan_out_A)), 1 / (1.0 + max(fan_in_A, fan_out_A)))
+
+    for i in range(1, num_factors):
+      dim_i = shape[i]
+      param_name = f'tf_{chr(65 + i)}'
+      param = nn.Parameter(torch.empty(dim_i, scaled_rank))
+      fan_in_i, fan_out_i = dim_i, scaled_rank
+      param.data.uniform_(-1 / (1.0 + min(fan_in_i, fan_out_i)), 1 / (1.0 + max(fan_in_i, fan_out_i)))
+      self.register_parameter(param_name, param)
 
   '''
   We zero all virtual feature weights because during serialization to .nnue
@@ -78,6 +130,40 @@ class NNUE(pl.LightningModule):
       for a, b in self.feature_set.get_virtual_feature_ranges():
         weights[:, a:b] = 0.0
     self.input.weight = nn.Parameter(weights)
+
+  def get_materialized_cp_weight(self) -> Tensor:
+    """Materialize the CP-decomposed weight for the main feature factor.
+
+    Returns a tensor of shape (l1_size, num_real_features) containing
+    the outer product of the factor matrices reshaped to 2D.
+    """
+    tf_params = [self.tf_A, self.tf_B, self.tf_C]
+    if hasattr(self, 'tf_D'):
+      tf_params.append(self.tf_D)
+    num_factors = len(tf_params)
+
+    # Build einsum string
+    # Need num_factors chars for unique dims + 1 char for shared rank
+    dim_chars = [chr(110 + i) for i in range(num_factors)]  # e.g., n,o,p for 3 factors
+    rank_char = chr(110 + num_factors)  # e.g., q
+    einsum_parts = [f'{dim_chars[0]}{rank_char}']
+    for i in range(1, num_factors):
+      einsum_parts.append(f'{dim_chars[i]}{rank_char}')
+    einsum_str = ','.join(einsum_parts)
+    output_indices = ''.join(dim_chars)
+    einsum_expr = einsum_str + '->' + output_indices
+
+    # Compute outer product via einsum
+    weight_4d = torch.einsum(einsum_expr, *tf_params)
+
+    # Reshape to 2D: (l1_size, num_real_features)
+    real_features = self.feature_set.features[0].num_real_features
+    if weight_4d.numel() != self.tf_A.shape[0] * real_features:
+      weight_4d = weight_4d.view(self.tf_A.shape[0], real_features)
+    else:
+      weight_4d = weight_4d.reshape(self.tf_A.shape[0], real_features)
+
+    return weight_4d
 
   '''
   This method attempts to convert the model from using the self.feature_set
@@ -118,25 +204,72 @@ class NNUE(pl.LightningModule):
     else:
       raise Exception('Cannot change feature set from {} to {}.'.format(self.feature_set.name, new_feature_set.name))
 
-  def forward(self, us: Tensor, them: Tensor, w_in: Tensor, b_in: Tensor) -> Tensor:
-    w = self.input(w_in)
-    b = self.input(b_in)
+  def forward(self, us: Tensor, them: Tensor, w_in: Tensor, b_in: Tensor,
+              bucket_index: Tensor | None = None) -> Tensor:
+    """Forward pass through the network.
+    
+    Args:
+        us: Color tensor for the side to move (size: [batch, 1])
+        them: Color tensor for the opponent (size: [batch, 1])
+        w_in: White active features sparse tensor (size: [batch, num_features])
+        b_in: Black active features sparse tensor (size: [batch, num_features])
+        bucket_index: Optional bucket indices for LayerStacks > 1 (size: [batch])
+            If None, defaults to bucket 0 (for LayerStacks=1 compatibility).
+    """
+    if self.factorization_rank > 0:
+      cp_weight = self.get_materialized_cp_weight()
+      num_real_features = self.feature_set.num_real_features
+      effective_weight = self.input.weight.clone()
+      effective_weight[:, :num_real_features] += cp_weight
+      effective_bias = self.input.bias
+      w = F.linear(w_in, effective_weight, effective_bias)
+      b = F.linear(b_in, effective_weight, effective_bias)
+    else:
+      w = self.input(w_in)
+      b = self.input(b_in)
+    
     l0_ = (us * torch.cat([w, b], dim=1)) + (them * torch.cat([b, w], dim=1))
     # clamp here is used as a clipped relu to (0.0, 1.0)
     l0_ = torch.clamp(l0_, 0.0, 1.0)
-    l1_ = torch.clamp(self.l1(l0_), 0.0, 1.0)
+    
+    if self.layer_stacks > 1:
+      # LayerStacks > 1: select per-stack weights based on bucket_index
+      if bucket_index is None:
+        bucket_index = torch.zeros(l0_.size(0), dtype=torch.long, device=l0_.device)
+      bucket_index = torch.clamp(bucket_index, 0, self.layer_stacks - 1)
+      
+      # Gather the correct l1 weights for each sample using advanced indexing
+      l1_weights = torch.stack([self.l1_stack[s].weight for s in range(self.layer_stacks)], dim=0)
+      l1_biases = torch.stack([self.l1_stack[s].bias for s in range(self.layer_stacks)], dim=0)
+      
+      # Select weights for each sample: l1_weights[bucket_index[i], :, :]
+      selected_l1_weight = l1_weights[bucket_index]  # [batch, l2_size, 2*l1_size]
+      selected_l1_bias = l1_biases[bucket_index]      # [batch, l2_size]
+      
+      # Batched matrix multiply: [batch, 2*l1_size] @ [batch, 2*l1_size, l2_size].transpose(-1,-2) + bias
+      l1_ = torch.bmm(l0_.unsqueeze(1), selected_l1_weight.transpose(-1, -2)).squeeze(1) + selected_l1_bias
+      l1_ = torch.clamp(l1_, 0.0, 1.0)
+    else:
+      # LayerStacks = 1: use shared l1 layer
+      l1_ = torch.clamp(self.l1_stack[0](l0_), 0.0, 1.0)
+    
     l2_ = torch.clamp(self.l2(l1_), 0.0, 1.0)
     x = self.output(l2_)
     return x
 
   def step_(self, batch: tuple[Tensor, ...], batch_idx: int, loss_type: str) -> Tensor:
-    us, them, white, black, outcome, score, ply = batch
+    # Extract bucket_index from batch data (8-tuple when available)
+    if len(batch) == 8:
+      us, them, white, black, outcome, score, ply, bucket_index = batch
+    else:
+      us, them, white, black, outcome, score, ply = batch
+      bucket_index = None
 
     # 600 is the kPonanzaConstant scaling factor needed to convert the training net output to a score.
     # This needs to match the value used in the serializer
     scaling = self.score_scaling
 
-    q = self(us, them, white, black) * self.NNUE_TO_SCORE / scaling
+    q = self(us, them, white, black, bucket_index) * self.NNUE_TO_SCORE / scaling
     t = outcome * (1.0 - self.label_smoothing_eps * 2.0) + self.label_smoothing_eps
     p = (score / scaling).sigmoid()
 
@@ -238,6 +371,19 @@ class NNUE(pl.LightningModule):
       kWeightScale = kBiasScale / self.ACTIVATION_SCALE
       kMaxWeight = self.ACTIVATION_SCALE / kWeightScale
       child.weight.data.clamp_(-kMaxWeight, kMaxWeight)
+
+    # Clip CP decomposition factors to prevent weight explosion
+    if self.factorization_rank > 0:
+      kWeightScale = (1 << self.WEIGHT_SCALE_BITS) * self.ACTIVATION_SCALE / self.ACTIVATION_SCALE
+      kMaxWeight = self.ACTIVATION_SCALE / kWeightScale
+      rank = self.factorization_rank
+      # Scale by rank to account for CP sum accumulation
+      factor_clip = (kMaxWeight / rank) ** (1 / 3)
+      for param in [self.tf_A, self.tf_B, self.tf_C]:
+        param.data.clamp_(-factor_clip, factor_clip)
+      if hasattr(self, 'tf_D'):
+        factor_clip = (kMaxWeight / rank) ** (1 / 4)
+        self.tf_D.data.clamp_(-factor_clip, factor_clip)
 
   def configure_optimizers(self) -> Optimizer:
     return torch.optim.SGD(self.parameters(), lr=self.lr[0], momentum=self.momentum)
