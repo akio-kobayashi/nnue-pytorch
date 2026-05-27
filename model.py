@@ -25,7 +25,7 @@ class NNUE(pl.LightningModule):
       momentum: float = 0.0, ply_begin_threshold: float = 100.0, ply_end_threshold: float = 120.0,
       l1_size: int = 1024, l2_size: int = 8, l3_size: int = 96,
       layer_stacks: int = 1,
-      factorization_rank: int = 0, factorization_weight_decay: float = 1e-4):
+      factorization_rank: int | list[int] | tuple[int, ...] = 0, factorization_weight_decay: float = 1e-4):
     super().__init__()
     if lambda_ is None:
       lambda_ = [1.0]
@@ -78,18 +78,20 @@ class NNUE(pl.LightningModule):
     self._init_factorization()
 
   def _init_factorization(self) -> None:
-    """Initialize CP decomposition parameters for the main feature factor."""
-    if self.factorization_rank <= 0:
+    """Initialize Tucker decomposition parameters for the main feature factor.
+    
+    Tucker decomposition factorizes the 3D/4D weight tensor W as:
+      W = G x_0 U_0 x_1 U_1 x_2 U_2 ... (tensor product)
+    where G is the core tensor (shape: r_0 x r_1 x r_2 x ...)
+    and U_m are per-mode factor matrices (shape: n_m x r_m).
+    """
+    if not self._is_factorization_enabled():
       return
     feature_set = self.feature_set
-    # Only single feature block supported
     assert len(feature_set.features) == 1, 'Tensor decomposition requires a single feature block'
     main_factor_name = feature_set.features[0].get_main_factor_name()
-    num_real_features = feature_set.features[0].num_real_features
 
-    # Determine decomposition dimensions from the main factor
     l1_size = self.l1_stack[0].in_features // 2
-    main_factor_block = feature_set.features[0]
     is_halfkpe9 = main_factor_name.startswith('HalfKPE9')
     if is_halfkpe9:
       from halfkpe9 import NUM_SQ, NUM_PLANES, EFFECT_STATES
@@ -100,24 +102,40 @@ class NNUE(pl.LightningModule):
       shape = (l1_size, NUM_SQ, NUM_PLANES)
       num_factors = 3
 
-    # Scale rank by number of factors to keep total parameter count roughly proportional
-    scaled_rank = self.factorization_rank
+    # Determine per-mode ranks (Tucker allows different ranks per mode)
+    if isinstance(self.factorization_rank, (list, tuple)):
+      ranks = list(self.factorization_rank)
+    else:
+      ranks = [self.factorization_rank] * num_factors
+    
+    assert len(ranks) == num_factors, f'rank list must have {num_factors} elements'
+    self._tucker_ranks = ranks
 
-    # Create CP decomposition parameters with Xavier initialization
-    self.register_parameter('tf_A', nn.Parameter(torch.empty(shape[0], scaled_rank)))
-    fan_in_A, fan_out_A = shape[0], scaled_rank
-    self.tf_A.data.uniform_(-1 / (1.0 + min(fan_in_A, fan_out_A)), 1 / (1.0 + max(fan_in_A, fan_out_A)))
+    # Create core tensor G with shape (r0, r1, r2, ...)
+    core = torch.empty(*ranks)
+    fan_in_core, fan_out_core = max(ranks), min(ranks)
+    core.data.uniform_(-1 / (1.0 + min(fan_in_core, fan_out_core)), 1 / (1.0 + max(fan_in_core, fan_out_core)))
+    self.register_parameter('core', nn.Parameter(core))
 
-    for i in range(1, num_factors):
-      dim_i = shape[i]
-      param_name = f'tf_{chr(65 + i)}'
-      param = nn.Parameter(torch.empty(dim_i, scaled_rank))
-      fan_in_i, fan_out_i = dim_i, scaled_rank
-      param.data.uniform_(-1 / (1.0 + min(fan_in_i, fan_out_i)), 1 / (1.0 + max(fan_in_i, fan_out_i)))
-      self.register_parameter(param_name, param)
+    # Create per-mode factor matrices U_m of shape (n_m, r_m)
+    for m in range(num_factors):
+      dim_m = shape[m]
+      rank_m = ranks[m]
+      U_m = nn.Parameter(torch.empty(dim_m, rank_m))
+      fan_in_m, fan_out_m = dim_m, rank_m
+      U_m.data.uniform_(-1 / (1.0 + min(fan_in_m, fan_out_m)), 1 / (1.0 + max(fan_in_m, fan_out_m)))
+      setattr(self, f'U_{m}', U_m)
 
+  def _is_factorization_enabled(self) -> bool:
+    """Check if Tucker factorization is enabled."""
+    if isinstance(self.factorization_rank, (list, tuple)):
+      return any(r > 0 for r in self.factorization_rank)
+    return self.factorization_rank > 0
   '''
   We zero all virtual feature weights because during serialization to .nnue
+
+
+
   we compute weights for each real feature as being the sum of the weights for
   the real feature in question and the virtual features it can be factored to.
   This means that if we didn't initialize the virtual feature weights to zero
@@ -131,37 +149,40 @@ class NNUE(pl.LightningModule):
         weights[:, a:b] = 0.0
     self.input.weight = nn.Parameter(weights)
 
-  def get_materialized_cp_weight(self) -> Tensor:
-    """Materialize the CP-decomposed weight for the main feature factor.
-
+  def get_materialized_tucker_weight(self) -> Tensor:
+    """Materialize the Tucker-decomposed weight for the main feature factor.
+    
+    Computes the Tucker product: W = core x_0 U_0 x_1 U_1 x_2 U_2 ...
     Returns a tensor of shape (l1_size, num_real_features) containing
-    the outer product of the factor matrices reshaped to 2D.
+    the Tucker product reshaped to 2D.
     """
-    tf_params = [self.tf_A, self.tf_B, self.tf_C]
-    if hasattr(self, 'tf_D'):
-      tf_params.append(self.tf_D)
-    num_factors = len(tf_params)
+    num_factors = len(self._tucker_ranks)
 
-    # Build einsum string
-    # Need num_factors chars for unique dims + 1 char for shared rank
-    dim_chars = [chr(110 + i) for i in range(num_factors)]  # e.g., n,o,p for 3 factors
-    rank_char = chr(110 + num_factors)  # e.g., q
-    einsum_parts = [f'{dim_chars[0]}{rank_char}']
-    for i in range(1, num_factors):
-      einsum_parts.append(f'{dim_chars[i]}{rank_char}')
-    einsum_str = ','.join(einsum_parts)
-    output_indices = ''.join(dim_chars)
-    einsum_expr = einsum_str + '->' + output_indices
+    # Build einsum string for Tucker product
+    # core: (r0, r1, r2, ...) -> einsum chars a, b, c, ...
+    # U_m: (n_m, r_m) -> einsum chars (d, a), (e, b), (f, c), ...
+    core_chars = [chr(97 + i) for i in range(num_factors)]      # a, b, c, d
+    U_chars = [chr(97 + num_factors + i) for i in range(num_factors)]  # e, f, g, h
+    output_chars = [chr(110 + i) for i in range(num_factors)]    # n, o, p, q
 
-    # Compute outer product via einsum
-    weight_4d = torch.einsum(einsum_expr, *tf_params)
+    # Build einsum parts
+    # core: (r0, r1, r2, ...) -> a, b, c, ...
+    # U_m: (n_m, r_m) -> (d, a), (e, b), (f, c), ...
+    # Output: d, e, f, ...
+    einsum_parts = [''.join(core_chars)]
+    for m in range(num_factors):
+      einsum_parts.append(f'{U_chars[m]}{core_chars[m]}')
+    einsum_expr = ','.join(einsum_parts) + '->' + ''.join(U_chars)
+
+    # Get factor matrices U_m
+    U_params = [getattr(self, f'U_{m}') for m in range(num_factors)]
+
+    # Tucker product
+    weight_4d = torch.einsum(einsum_expr, self.core, *U_params)
 
     # Reshape to 2D: (l1_size, num_real_features)
     real_features = self.feature_set.features[0].num_real_features
-    if weight_4d.numel() != self.tf_A.shape[0] * real_features:
-      weight_4d = weight_4d.view(self.tf_A.shape[0], real_features)
-    else:
-      weight_4d = weight_4d.reshape(self.tf_A.shape[0], real_features)
+    weight_4d = weight_4d.reshape(self.U_0.shape[0], real_features)
 
     return weight_4d
 
@@ -216,11 +237,11 @@ class NNUE(pl.LightningModule):
         bucket_index: Optional bucket indices for LayerStacks > 1 (size: [batch])
             If None, defaults to bucket 0 (for LayerStacks=1 compatibility).
     """
-    if self.factorization_rank > 0:
-      cp_weight = self.get_materialized_cp_weight()
+    if self._is_factorization_enabled():
+      tucker_weight = self.get_materialized_tucker_weight()
       num_real_features = self.feature_set.num_real_features
       effective_weight = self.input.weight.clone()
-      effective_weight[:, :num_real_features] += cp_weight
+      effective_weight[:, :num_real_features] += tucker_weight
       effective_bias = self.input.bias
       w = F.linear(w_in, effective_weight, effective_bias)
       b = F.linear(b_in, effective_weight, effective_bias)
@@ -372,18 +393,19 @@ class NNUE(pl.LightningModule):
       kMaxWeight = self.ACTIVATION_SCALE / kWeightScale
       child.weight.data.clamp_(-kMaxWeight, kMaxWeight)
 
-    # Clip CP decomposition factors to prevent weight explosion
-    if self.factorization_rank > 0:
+    # Clip Tucker decomposition factors to prevent weight explosion
+    if self._is_factorization_enabled():
       kWeightScale = (1 << self.WEIGHT_SCALE_BITS) * self.ACTIVATION_SCALE / self.ACTIVATION_SCALE
       kMaxWeight = self.ACTIVATION_SCALE / kWeightScale
-      rank = self.factorization_rank
-      # Scale by rank to account for CP sum accumulation
-      factor_clip = (kMaxWeight / rank) ** (1 / 3)
-      for param in [self.tf_A, self.tf_B, self.tf_C]:
-        param.data.clamp_(-factor_clip, factor_clip)
-      if hasattr(self, 'tf_D'):
-        factor_clip = (kMaxWeight / rank) ** (1 / 4)
-        self.tf_D.data.clamp_(-factor_clip, factor_clip)
+      num_factors = len(self._tucker_ranks)
+      # Scale by max rank to account for Tucker product accumulation
+      max_rank = max(self._tucker_ranks)
+      factor_clip = (kMaxWeight / max_rank) ** (1 / num_factors)
+      # Clip core tensor
+      self.core.data.clamp_(-factor_clip, factor_clip)
+      # Clip each factor matrix
+      for m in range(num_factors):
+        getattr(self, f'U_{m}').data.clamp_(-factor_clip, factor_clip)
 
   def configure_optimizers(self) -> Optimizer:
     return torch.optim.SGD(self.parameters(), lr=self.lr[0], momentum=self.momentum)
