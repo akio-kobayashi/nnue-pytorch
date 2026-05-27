@@ -155,6 +155,8 @@ struct HalfKPFactorized {
             counter += 1;
         }
     }
+};
+
 struct HalfKPE9 {
     static constexpr int NUM_SQ = 81;
     static constexpr int NUM_PLANES = 1548; // == fe_end
@@ -179,7 +181,7 @@ struct HalfKPE9 {
         if (perspective_org == Color::WHITE) {
             sq_p = Inv(sq_p);
         }
-        return std::min(int(pos.board_effect[perspective].effect(sq_p)), 2);
+        return std::min(pos.attackers_to(perspective, sq_p).pop_count(), 2);
     }
 
     static int make_index(Square sq_target_k, Eval::BonaPiece p, int effect1, int effect2)
@@ -356,8 +358,6 @@ struct HalfKPE9Factorized {
     }
 };
 
-};
-
 // struct HalfKA {
 //     static constexpr int NUM_SQ = 64;
 //     static constexpr int NUM_PT = 12;
@@ -453,6 +453,35 @@ struct FeatureSet
     }
 };
 
+static float compute_non_pawn_material(const Position& pos)
+{
+    int npm = 0;
+    npm += pos.pieces(LANCE).pop_count() * 430;
+    npm += pos.pieces(KNIGHT).pop_count() * 581;
+    npm += pos.pieces(SILVER).pop_count() * 716;
+    npm += pos.pieces(GOLD).pop_count() * 782;
+    npm += pos.pieces(BISHOP).pop_count() * 1008;
+    npm += pos.pieces(ROOK).pop_count() * 1193;
+    npm += pos.pieces(PRO_LANCE).pop_count() * 430;
+    npm += pos.pieces(PRO_KNIGHT).pop_count() * 581;
+    npm += pos.pieces(PRO_SILVER).pop_count() * 716;
+    npm += pos.pieces(HORSE).pop_count() * 1008;
+    npm += pos.pieces(DRAGON).pop_count() * 1193;
+
+    for (Color c : {BLACK, WHITE})
+    {
+        const Hand h = pos.hand_of(c);
+        npm += hand_count(h, LANCE) * 430;
+        npm += hand_count(h, KNIGHT) * 581;
+        npm += hand_count(h, SILVER) * 716;
+        npm += hand_count(h, GOLD) * 782;
+        npm += hand_count(h, BISHOP) * 1008;
+        npm += hand_count(h, ROOK) * 1193;
+    }
+
+    return static_cast<float>(npm);
+}
+
 struct SparseBatch
 {
     static constexpr bool IS_BATCH = true;
@@ -470,6 +499,7 @@ struct SparseBatch
         white_values = new float[size * FeatureSet<Ts...>::MAX_ACTIVE_FEATURES];
         black_values = new float[size * FeatureSet<Ts...>::MAX_ACTIVE_FEATURES];
         ply = new float[size];
+        npm = new float[size];
 
         num_active_white_features = 0;
         num_active_black_features = 0;
@@ -496,6 +526,7 @@ struct SparseBatch
     float* white_values;
     float* black_values;
     float* ply;
+    float* npm;
 
     ~SparseBatch()
     {
@@ -507,6 +538,7 @@ struct SparseBatch
         delete[] white_values;
         delete[] black_values;
         delete[] ply;
+        delete[] npm;
     }
 
 private:
@@ -518,6 +550,7 @@ private:
         outcome[i] = (e.result + 1.0f) / 2.0f;
         score[i] = e.score;
         ply[i] = e.ply;
+        npm[i] = compute_non_pawn_material(*e.pos);
         fill_features(FeatureSet<Ts...>{}, i, e);
     }
 
