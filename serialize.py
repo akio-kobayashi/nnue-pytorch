@@ -31,7 +31,7 @@ def ascii_hist(name, x, bins=6):
 VERSION = 0x7AF32F16
 YANE_LAYERSTACK_HASH_SEED = 0xB58B6A8D
 YANE_HALFKP_FRIEND_HASH = 0x5D69D5B8
-YANE_HALFKPE9_HASH = 0x5D69D5B9
+YANE_HALFKPE9_HASH = 0x5D69D5B8
 
 
 def _infer_features_from_input_dim(input_dim):
@@ -107,19 +107,36 @@ def _yaneuraou_network_hash(model):
 
 
 def _yaneuraou_feature_name(feature_set_name):
-  if feature_set_name.startswith("HalfKP"):
-    return "HalfKP(Friend)"
   if feature_set_name.startswith("HalfKPE9"):
     return "HalfKPE9(Friend)"
+  if feature_set_name.startswith("HalfKP"):
+    return "HalfKP(Friend)"
   return feature_set_name
 
 
 def _yaneuraou_feature_hash(feature_set):
-  if feature_set.name.startswith("HalfKP"):
-    return YANE_HALFKP_FRIEND_HASH
   if feature_set.name.startswith("HalfKPE9"):
     return YANE_HALFKPE9_HASH
+  if feature_set.name.startswith("HalfKP"):
+    return YANE_HALFKP_FRIEND_HASH
   return feature_set.hash
+
+
+def _yaneuraou_feature_transformer_hash(model_or_feature_set, output_dimensions=None):
+  if hasattr(model_or_feature_set, "feature_set"):
+    feature_set = model_or_feature_set.feature_set
+    output_dimensions = model_or_feature_set.input.out_features * 2
+  else:
+    feature_set = model_or_feature_set
+    if output_dimensions is None:
+      raise ValueError("output_dimensions is required when passing a feature set directly")
+  return _yaneuraou_feature_hash(feature_set) ^ output_dimensions
+
+
+def _yaneuraou_header_hash(model, network_hash=None):
+  if network_hash is None:
+    network_hash = _yaneuraou_network_hash(model)
+  return _yaneuraou_feature_transformer_hash(model) ^ network_hash
 
 
 def _build_stockfish_description(model):
@@ -151,7 +168,7 @@ def _build_yaneuraou_description(model):
   l1_size = model.input.out_features
   l2_size = model.l2.in_features
   l3_size = model.l2.out_features
-  num_features = model.feature_set.num_features
+  num_features = model.feature_set.num_real_features
   num_buckets = model.num_buckets if hasattr(model, 'num_buckets') else 1
 
   feature_name = _yaneuraou_feature_name(model.feature_set.name)
@@ -249,14 +266,13 @@ class NNUEWriter():
 
   def feature_transformer_hash(self, model):
     if self.target_engine == 'yaneuraou':
-      # YaneuraOu: RawFeatureHash ^ kOutputDimensions (kOutputDimensions = l1_size * 2)
-      return _yaneuraou_feature_hash(model.feature_set) ^ (model.input.out_features * 2)
+      return _yaneuraou_feature_transformer_hash(model)
     # Stockfish-style default used by this serializer previously
     return model.feature_set.hash ^ model.input.in_features
 
   def header_hash(self, model, fc_hash):
     if self.target_engine == 'yaneuraou':
-      return self.yane_network_hash
+      return _yaneuraou_header_hash(model, self.yane_network_hash)
     return fc_hash ^ model.feature_set.hash ^ model.input.in_features
 
   def write_header(self, model, fc_hash):
@@ -422,12 +438,12 @@ class NNUEReader():
 
   def feature_transformer_hash(self):
     if self.target_engine == 'yaneuraou':
-      return self.feature_set.hash ^ (self.model.input.out_features * 2)
+      return _yaneuraou_feature_transformer_hash(self.model)
     return self.feature_set.hash ^ self.model.input.in_features
 
   def expected_header_hash(self, fc_hash):
     if self.target_engine == 'yaneuraou':
-      return self.yane_network_hash
+      return _yaneuraou_header_hash(self.model, self.yane_network_hash)
     return fc_hash ^ self.feature_set.hash ^ self.model.input.in_features
 
   def read_header(self, feature_set, fc_hash):
