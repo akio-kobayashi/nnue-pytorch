@@ -256,7 +256,7 @@ class NNUEWriter():
 
   def header_hash(self, model, fc_hash):
     if self.target_engine == 'yaneuraou':
-      return self.feature_transformer_hash(model) ^ self.yane_network_hash
+      return self.yane_network_hash
     return fc_hash ^ model.feature_set.hash ^ model.input.in_features
 
   def write_header(self, model, fc_hash):
@@ -427,7 +427,7 @@ class NNUEReader():
 
   def expected_header_hash(self, fc_hash):
     if self.target_engine == 'yaneuraou':
-      return self.feature_transformer_hash() ^ self.yane_network_hash
+      return self.yane_network_hash
     return fc_hash ^ self.feature_set.hash ^ self.model.input.in_features
 
   def read_header(self, feature_set, fc_hash):
