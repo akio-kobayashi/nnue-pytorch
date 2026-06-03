@@ -14,10 +14,10 @@ import serialize
 def parse_args():
   parser = argparse.ArgumentParser(
       description=(
-          "Load a trained nnue-pytorch checkpoint, evaluate PackedSfenValue records in batches, "
+          "Load a trained nnue-pytorch checkpoint or serialized model, evaluate PackedSfenValue records in batches, "
           "and write a new PackedSfenValue .bin file with updated scores."
       ))
-  parser.add_argument("checkpoint", help="Path to a .ckpt checkpoint")
+  parser.add_argument("model", help="Path to a .ckpt checkpoint or .pt serialized model")
   parser.add_argument("input_bin", help="Input PackedSfenValue .bin")
   parser.add_argument("output_bin", help="Output PackedSfenValue .bin")
   parser.add_argument("--batch-size", type=int, default=1024, help="Inference batch size")
@@ -64,29 +64,56 @@ def normalize_model_for_serialize_inference(model):
 
 
 def load_model(args):
-  checkpoint = torch.load(args.checkpoint, map_location="cpu")
-  resolved_features, resolved_l1_size, resolved_l2_size, resolved_l3_size = resolve_model_args(args, checkpoint)
-  nnue = M.NNUE(
-      features=resolved_features,
-      l1_size=resolved_l1_size,
-      l2_size=resolved_l2_size,
-      l3_size=resolved_l3_size,
-  )
-  state_dict = checkpoint["state_dict"]
-  if hasattr(serialize, "_upgrade_legacy_state_dict"):
-    state_dict = serialize._upgrade_legacy_state_dict(state_dict, resolved_features)
-  nnue.load_state_dict(state_dict)
-  serialize._load_checkpoint_extras(nnue, checkpoint)
-  if args.use_ema and hasattr(nnue, "apply_ema_weights"):
-    if not nnue.apply_ema_weights():
-      raise RuntimeError("Requested --use_ema but no EMA weights were found in the checkpoint.")
+  model_path = Path(args.model)
+  loaded = torch.load(model_path, map_location="cpu")
+
+  if isinstance(loaded, dict) and "state_dict" in loaded:
+    checkpoint = loaded
+    resolved_features, resolved_l1_size, resolved_l2_size, resolved_l3_size = resolve_model_args(args, checkpoint)
+    nnue = M.NNUE(
+        features=resolved_features,
+        l1_size=resolved_l1_size,
+        l2_size=resolved_l2_size,
+        l3_size=resolved_l3_size,
+    )
+    state_dict = checkpoint["state_dict"]
+    if hasattr(serialize, "_upgrade_legacy_state_dict"):
+      state_dict = serialize._upgrade_legacy_state_dict(state_dict, resolved_features)
+    nnue.load_state_dict(state_dict)
+    serialize._load_checkpoint_extras(nnue, checkpoint)
+    if args.use_ema and hasattr(nnue, "apply_ema_weights"):
+      if not nnue.apply_ema_weights():
+        raise RuntimeError("Requested --use_ema but no EMA weights were found in the checkpoint.")
+  else:
+    if not hasattr(loaded, "feature_set") or not hasattr(loaded, "input"):
+      raise TypeError(f"Unsupported model file format: {model_path}")
+    nnue = loaded
+    resolved_features = args.features_override or nnue.feature_set.name
+    if resolved_features != nnue.feature_set.name:
+      raise ValueError(
+          f"--features={resolved_features} does not match .pt model feature set {nnue.feature_set.name}"
+      )
+    resolved_l1_size = args.l1_size or nnue.input.out_features
+    resolved_l2_size = args.l2_size or nnue.l1.out_features
+    resolved_l3_size = args.l3_size or nnue.l2.out_features
+    if resolved_l1_size != nnue.input.out_features or resolved_l2_size != nnue.l1.out_features or resolved_l3_size != nnue.l2.out_features:
+      raise ValueError(
+          "Requested layer sizes do not match the loaded .pt model: "
+          f"expected l1={nnue.input.out_features}, l2={nnue.l1.out_features}, l3={nnue.l2.out_features}"
+      )
+    if args.use_ema:
+      if hasattr(nnue, "apply_ema_weights"):
+        if not nnue.apply_ema_weights():
+          raise RuntimeError("Requested --use_ema but no EMA weights were found in the .pt model.")
+      else:
+        raise RuntimeError("Requested --use_ema but the loaded .pt model does not support EMA weights.")
   if args.serialize_normalize:
     normalize_model_for_serialize_inference(nnue)
   nnue.eval()
   feature_set = features.get_feature_set_from_name(resolved_features)
   print(
       "loaded checkpoint:",
-      Path(args.checkpoint),
+      model_path,
       f"features={resolved_features}",
       f"l1={resolved_l1_size}",
       f"l2={resolved_l2_size}",
