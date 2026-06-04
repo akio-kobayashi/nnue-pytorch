@@ -65,7 +65,7 @@ def normalize_model_for_serialize_inference(model):
 
 def load_model(args):
   model_path = Path(args.model)
-  loaded = torch.load(model_path, map_location="cpu")
+  loaded = torch.load(model_path, map_location="cpu", weights_only=False)
 
   if isinstance(loaded, dict) and "state_dict" in loaded:
     checkpoint = loaded

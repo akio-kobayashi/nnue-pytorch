@@ -9,6 +9,7 @@ import operator
 import os
 import matplotlib.pyplot as plt
 import datetime
+import re
 
 def ascii_hist(name, x, bins=6):
   N,X = numpy.histogram(x, bins=bins)
@@ -43,6 +44,124 @@ def _infer_model_args_from_state_dict(state_dict):
       "l1_size": int(state_dict["input.weight"].shape[0]),
       "l2_size": int(state_dict["l1.weight"].shape[0]),
       "l3_size": int(state_dict["l2.weight"].shape[0]),
+  }
+
+
+def _parse_network_description(description: bytes):
+  text = description.decode("ascii")
+
+  feature_match = re.search(r"Features=.+\[(\d+)->(\d+)x2\],", text)
+  if not feature_match:
+    raise ValueError(f"Could not parse feature transformer dimensions from network description: {text}")
+
+  fc_match = re.search(
+      r"Network=AffineTransform\[1<-(\d+)\]\(ClippedReLU\[\d+\]"
+      r"\(AffineTransform\[(\d+)<-(\d+)\]\(ClippedReLU\[\d+\]"
+      r"\(AffineTransform\[(\d+)<-(\d+)\]",
+      text,
+  )
+  if not fc_match:
+    raise ValueError(f"Could not parse fully connected dimensions from network description: {text}")
+
+  input_dim = int(feature_match.group(1))
+  l1_size = int(feature_match.group(2))
+  l3_size = int(fc_match.group(1))
+  l2_size = int(fc_match.group(2))
+  if int(fc_match.group(3)) != l2_size or int(fc_match.group(4)) != l2_size or int(fc_match.group(5)) != l1_size * 2:
+    raise ValueError(f"Unexpected network description layout: {text}")
+
+  return {
+      "features": _infer_features_from_input_dim(input_dim),
+      "l1_size": l1_size,
+      "l2_size": l2_size,
+      "l3_size": l3_size,
+  }
+
+
+def _compute_fc_hash(l1_in_features: int, l2_size: int, l3_size: int) -> int:
+  prev_hash = 0xEC42E90D ^ l1_in_features
+
+  for out_features in (l2_size, l3_size, 1):
+    layer_hash = (0xCC03DAE4 + out_features) & 0xFFFFFFFF
+    layer_hash ^= prev_hash >> 1
+    layer_hash ^= (prev_hash << 31) & 0xFFFFFFFF
+    if out_features != 1:
+      layer_hash = (layer_hash + 0x538D24C7) & 0xFFFFFFFF
+    prev_hash = layer_hash
+
+  return layer_hash
+
+
+def _padded_fc_input_size(num_inputs: int) -> int:
+  return ((num_inputs + 31) // 32) * 32
+
+
+def _expected_bin_file_size(num_features: int, description_length: int, l1_size: int, l2_size: int, l3_size: int) -> int:
+  return (
+      12 + description_length +
+      4 +
+      2 * l1_size + 2 * num_features * l1_size +
+      4 +
+      4 * l2_size + l2_size * _padded_fc_input_size(l1_size * 2) +
+      4 * l3_size + l3_size * _padded_fc_input_size(l2_size) +
+      4 + _padded_fc_input_size(l3_size)
+  )
+
+
+def _infer_model_args_from_bin_header(network_hash: int, feature_transformer_hash: int, description_length: int, file_size: int, max_hidden_size: int = 2048):
+  candidates = []
+
+  for feature_name in features.get_available_feature_blocks_names():
+    feature_set = features.get_feature_set_from_name(feature_name)
+    l1_in_features = feature_transformer_hash ^ feature_set.hash
+    if l1_in_features <= 0 or l1_in_features % 2 != 0:
+      continue
+
+    l1_size = l1_in_features // 2
+    target_fc_hash = network_hash ^ feature_set.hash ^ l1_in_features
+
+    for l2_size in range(1, max_hidden_size + 1):
+      for l3_size in range(1, max_hidden_size + 1):
+        if _compute_fc_hash(l1_in_features, l2_size, l3_size) != target_fc_hash:
+          continue
+        if _expected_bin_file_size(feature_set.num_features, description_length, l1_size, l2_size, l3_size) != file_size:
+          continue
+        candidates.append({
+            "features": feature_name,
+            "l1_size": l1_size,
+            "l2_size": l2_size,
+            "l3_size": l3_size,
+        })
+
+  if len(candidates) != 1:
+    raise ValueError(f"Could not uniquely infer model args from binary header. Candidates: {candidates}")
+
+  return candidates[0]
+
+
+def _read_bin_metadata(path):
+  file_size = os.path.getsize(path)
+  with open(path, "rb") as f:
+    version = struct.unpack("<I", f.read(4))[0]
+    network_hash = struct.unpack("<I", f.read(4))[0]
+    description_length = struct.unpack("<I", f.read(4))[0]
+    description = f.read(description_length)
+    feature_transformer_hash = struct.unpack("<I", f.read(4))[0]
+
+  inferred_args = _infer_model_args_from_bin_header(network_hash, feature_transformer_hash, description_length, file_size)
+
+  try:
+    described_args = _parse_network_description(description)
+  except ValueError:
+    described_args = None
+
+  return {
+      "version": version,
+      "network_hash": network_hash,
+      "feature_transformer_hash": feature_transformer_hash,
+      "description": description,
+      "described_args": described_args,
+      "inferred_args": inferred_args,
   }
 
 
@@ -354,7 +473,10 @@ def main():
   elif args.source.endswith(".bin"):
     if not args.target.endswith(".pt"):
       raise Exception("Target file must end with .pt")
-    resolved_features, resolved_l1_size, resolved_l2_size, resolved_l3_size = resolve_model_args()
+    metadata = _read_bin_metadata(args.source)
+    if metadata["version"] != VERSION:
+      raise ValueError(f"Unsupported NNUE bin version: {metadata['version']:x}")
+    resolved_features, resolved_l1_size, resolved_l2_size, resolved_l3_size = resolve_model_args(inferred=metadata["inferred_args"])
     feature_set = features.get_feature_set_from_name(resolved_features)
     with open(args.source, 'rb') as f:
       reader = NNUEReader(
